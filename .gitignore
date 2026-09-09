@@ -1,0 +1,9 @@
+build/
+.gradle/
+**/build/
+.npm-cache/
+qr-upstream/
+**/local.properties
+*.log
+tests/integration/*.bmp
+dist/*.zip

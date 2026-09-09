@@ -1,0 +1,13 @@
+settingsEvaluated { settings ->
+    settings.pluginManagement.repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+    }
+    settings.dependencyResolutionManagement.repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+    }
+    settings.pluginManagement.repositories.removeAll { it instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository && !it.url.toString().contains('aliyun.com') }
+    settings.dependencyResolutionManagement.repositories.removeAll { it instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository && !it.url.toString().contains('aliyun.com') }
+}

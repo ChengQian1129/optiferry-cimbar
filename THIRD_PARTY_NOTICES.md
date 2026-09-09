@@ -1,0 +1,31 @@
+# Third-party notices
+
+## qrcode-generator
+
+Used by the standalone sender to render QR matrices. MIT licensed, Copyright (c) Kazuhiko Arase. The vendored file is `sender/vendor/qrcode.js`.
+
+## jsQR
+
+Used by the mobile web receiver to decode camera frames. The original license is included at `web-receiver/vendor/jsQR-LICENSE.txt`; the vendored file is `web-receiver/vendor/jsQR.js`.
+
+## AndroidX CameraX / ZXing-C++
+
+The Android receiver uses AndroidX CameraX 1.4.1 for camera capture and `io.github.zxing-cpp:android:2.3.0` for native QR decoding from the CameraX Y plane. AndroidX is Apache-2.0 licensed; ZXing-C++ is Apache-2.0 licensed. Their license notices are distributed by the upstream Maven artifacts.
+
+## Decimen Optical Transfer v0.3.0
+
+The AFL2 binary frame container, LT fountain implementation, and bundled ZXing decode worker are derived from Decimen Optical Transfer v0.3.0 by Evan Crawley (Bash Alarmist). Version 0.3.0 is MIT licensed. Source and the complete license text are retained under `third_party/decimen-v0.3/`.
+
+Project: https://github.com/bashalarmistalt/decimen-optical-transfer/tree/v0.3.0
+
+Only the MIT-licensed v0.3.0 implementation is used. Code from later AGPL-3.0 releases is not included.
+
+## zxing-wasm / zxing-cpp
+
+The high-speed receiver includes the `zxing-wasm` 2.x QR decoder bundle used by Decimen v0.3.0. `zxing-wasm` is MIT licensed and bundles ZXing-C++, which is Apache-2.0 licensed.
+
+## Additional OptiFerry dependencies
+
+Nayuki QR Code Generator (MIT), commit 3c6d0b3cefb4e049dc337e82237c9644399716a8, https://github.com/nayuki/QR-Code-generator. Copyright/license headers retained in wsl-sender/third_party/nayuki.
+SDL2 and SDL2_ttf (zlib license), dynamically linked from Ubuntu packages. OpenSSL 3 (Apache-2.0), dynamically linked. DejaVu fonts are installed from the distro and retain their upstream font licenses; they are not embedded in the binary.
+BeamFerry and its original third-party notices and copyright headers remain intact. Test-only jsQR is the upstream vendored distribution with its existing Apache-2.0 notice.

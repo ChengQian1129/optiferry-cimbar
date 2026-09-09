@@ -1,0 +1,76 @@
+package com.airferrylite.receiver
+
+import java.util.Base64
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class HighSpeedAssemblerTest {
+    @Test
+    fun rejectsShortAsciiFalsePositives() {
+        val fake = "06097436".toByteArray(Charsets.ISO_8859_1)
+        assertTrue(!HighSpeedAssembler.looksLikeFrame(fake))
+        assertTrue(!HighSpeedAssembler.isMultiLayoutFrame(fake))
+    }
+
+    @Test
+    fun recognizesSingleAndQuadLayoutMarkers() {
+        val frame = Base64.getDecoder().decode("0QwxSgAAAAAHABAAbgAAACLGYlvjOimgt5OYL00SrR+Mlm92")
+        assertTrue(HighSpeedAssembler.looksLikeFrame(frame))
+        assertTrue(!HighSpeedAssembler.isMultiLayoutFrame(frame))
+        frame[1] = 0x0d
+        assertTrue(HighSpeedAssembler.looksLikeFrame(frame))
+        assertTrue(HighSpeedAssembler.isMultiLayoutFrame(frame))
+        assertTrue(HighSpeedAssembler.isQuadLayoutFrame(frame))
+        frame[1] = 0x0e
+        assertTrue(HighSpeedAssembler.looksLikeFrame(frame))
+        assertTrue(!HighSpeedAssembler.isMultiLayoutFrame(frame))
+        frame[1] = 0x1c
+        assertTrue(HighSpeedAssembler.looksLikeFrame(frame))
+        assertTrue(HighSpeedAssembler.isMultiLayoutFrame(frame))
+        assertTrue(HighSpeedAssembler.isDualLayoutFrame(frame))
+        assertTrue(!HighSpeedAssembler.isQuadLayoutFrame(frame))
+        frame[1] = 0x1d
+        assertTrue(HighSpeedAssembler.looksLikeFrame(frame))
+        assertTrue(HighSpeedAssembler.isDualLayoutFrame(frame))
+        frame[1] = 0x1e
+        assertTrue(HighSpeedAssembler.looksLikeFrame(frame))
+        assertTrue(HighSpeedAssembler.isQuadLayoutFrame(frame))
+        assertTrue(HighSpeedAssembler.isQuadFullRefresh60Frame(frame))
+        frame[1] = 0x1f
+        assertTrue(HighSpeedAssembler.looksLikeFrame(frame))
+        assertTrue(HighSpeedAssembler.isQuadLayoutFrame(frame))
+        assertTrue(HighSpeedAssembler.isQuadFullRefresh60Frame(frame))
+    }
+
+    @Test
+    fun decodesGoldenFramesGeneratedByTheWebSender() {
+        val assembler = HighSpeedAssembler()
+        val frames = listOf(
+            "0QwxSgAAAAAHABAAbgAAACLGYlvjOimgt5OYL00SrR+Mlm92",
+            "0QwxSgEAAAAHABAAbgAAACLGYlsAv9a8vUXIPKMR21C7firi",
+            "0QwxSgIAAAAHABAAbgAAACLGYlv+4okaANkQV+Yce19p7lWG",
+            "0QwxSgMAAAAHABAAbgAAACLGYltjYXRpb24vb2N0ZXQtc3Ry",
+            "0QwxSgQAAAAHABAAbgAAACLGYlvjOimgt5OYL00SrR+Mlm92",
+            "0QwxSgUAAAAHABAAbgAAACLGYltfJCleZG9uNmJybmFwa2xp",
+            "0QwxSgYAAAAHABAAbgAAACLGYltfJCleZG9uNmJybmFwa2xp",
+            "0QwxSgcAAAAHABAAbgAAACLGYlt+BgJvZWFvK2traGRzdWRg",
+            "0QwxSggAAAAHABAAbgAAACLGYlsGABlqbmouamp2Y3Eudnx7",
+            "0QwxSgkAAAAHABAAbgAAACLGYluneW+St5mYN00JrR+MjW92",
+            "0QwxSgoAAAAHABAAbgAAACLGYlvYyaEpAt8VTO0DeVlp+F2P"
+        )
+        var update = HighSpeedUpdate(false)
+        for (frame in frames) {
+            update = assembler.accept(Base64.getDecoder().decode(frame))
+            assertNull(update.error)
+        }
+        val file = update.complete
+        assertNotNull(file)
+        assertTrue(update.solvedBlocks == update.totalBlocks)
+        assertArrayEquals(Base64.getDecoder().decode("AwEEAQUJAgYFAwUICQcJAwIDCAQGAgYEAwMI"), file!!.bytes)
+        assertTrue(file.name == "golden.bin")
+        assertTrue(file.mime == "application/octet-stream")
+    }
+}

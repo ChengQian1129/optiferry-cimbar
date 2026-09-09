@@ -1,0 +1,166 @@
+package com.airferrylite.receiver
+
+import java.lang.reflect.Method
+import java.nio.ByteBuffer
+import zxingcpp.BarcodeReader
+
+internal data class NativeHit(
+    val bytes: ByteArray?,
+    val text: String?,
+    val points: List<Pair<Float, Float>>,
+    val originLeft: Int = 0,
+    val originTop: Int = 0
+)
+
+internal data class LumaSnapshot(
+    val buffer: ByteBuffer,
+    val rowStride: Int,
+    val pixelStride: Int,
+    val width: Int,
+    val height: Int
+)
+
+/**
+ * CameraX Y-plane reader on top of zxing-cpp. The published Kotlin wrapper only
+ * exposes ImageProxy.read() (which rotates) so we call the Y-buffer JNI with
+ * rotation 0, matching the Java ZXing path that already worked on this device.
+ */
+internal class NativeQrDecoder {
+    private val reader = BarcodeReader().apply {
+        options.formats = setOf(BarcodeReader.Format.QR_CODE)
+        options.tryHarder = false
+        options.tryRotate = false
+        options.tryInvert = false
+        options.tryDownscale = false
+        options.isPure = false
+        options.binarizer = BarcodeReader.Binarizer.LOCAL_AVERAGE
+        options.textMode = BarcodeReader.TextMode.PLAIN
+        options.maxNumberOfSymbols = 4
+        options.returnErrors = false
+    }
+    private var packed: ByteBuffer? = null
+
+    fun read(luma: LumaSnapshot, region: ScanRegion, maxSymbols: Int, retryBinarizer: Boolean = true): List<NativeHit> {
+        reader.options.maxNumberOfSymbols = maxSymbols.coerceIn(1, 4)
+        val source = luma.buffer.duplicate().apply { rewind() }
+        reader.options.binarizer = BarcodeReader.Binarizer.LOCAL_AVERAGE
+        var results = readOnce(luma, source, region)
+        if (results.isEmpty() && retryBinarizer) {
+            reader.options.binarizer = BarcodeReader.Binarizer.GLOBAL_HISTOGRAM
+            reader.options.tryHarder = true
+            try {
+                results = readOnce(luma, source, region)
+            } finally {
+                reader.options.tryHarder = false
+            }
+        }
+        return results.mapNotNull { toHit(it, region.left, region.top) }
+    }
+
+    private fun readOnce(
+        luma: LumaSnapshot,
+        source: ByteBuffer,
+        region: ScanRegion
+    ): List<BarcodeReader.Result> {
+        return if (luma.pixelStride == 1 && source.isDirect) {
+            invokeReadY(source, luma.rowStride, region.left, region.top, region.width, region.height)
+        } else {
+            val packedBuffer = acquirePacked(region.width * region.height)
+            copyPacked(source, luma.rowStride, luma.pixelStride, region, packedBuffer)
+            invokeReadY(packedBuffer, region.width, 0, 0, region.width, region.height)
+        }
+    }
+
+    private fun acquirePacked(size: Int): ByteBuffer {
+        val existing = packed
+        if (existing != null && existing.capacity() >= size) {
+            existing.clear()
+            existing.limit(size)
+            return existing
+        }
+        val created = ByteBuffer.allocateDirect(size)
+        packed = created
+        return created
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun invokeReadY(
+        yBuffer: ByteBuffer,
+        rowStride: Int,
+        left: Int,
+        top: Int,
+        width: Int,
+        height: Int
+    ): List<BarcodeReader.Result> {
+        val raw = READ_Y_BUFFER.invoke(
+            reader,
+            yBuffer,
+            rowStride,
+            left,
+            top,
+            width,
+            height,
+            0,
+            reader.options
+        ) as? List<BarcodeReader.Result>
+        return raw.orEmpty()
+    }
+
+    private fun toHit(result: BarcodeReader.Result, originLeft: Int, originTop: Int): NativeHit? {
+        if (result.error != null || result.format != BarcodeReader.Format.QR_CODE) return null
+        val position = result.position
+        return NativeHit(
+            bytes = result.bytes,
+            text = result.text,
+            points = listOf(
+                position.topLeft.x.toFloat() to position.topLeft.y.toFloat(),
+                position.topRight.x.toFloat() to position.topRight.y.toFloat(),
+                position.bottomRight.x.toFloat() to position.bottomRight.y.toFloat(),
+                position.bottomLeft.x.toFloat() to position.bottomLeft.y.toFloat()
+            ),
+            originLeft = originLeft,
+            originTop = originTop
+        )
+    }
+
+    private fun copyPacked(
+        source: ByteBuffer,
+        rowStride: Int,
+        pixelStride: Int,
+        region: ScanRegion,
+        output: ByteBuffer
+    ) {
+        val input = source.duplicate()
+        val inputStart = input.position()
+        output.clear()
+        val rowBytes = ByteArray(region.width)
+        for (row in 0 until region.height) {
+            var inputOffset = inputStart + (region.top + row) * rowStride + region.left * pixelStride
+            if (pixelStride == 1) {
+                input.position(inputOffset)
+                input.get(rowBytes)
+                output.put(rowBytes)
+                continue
+            }
+            for (column in 0 until region.width) {
+                output.put(input.get(inputOffset))
+                inputOffset += pixelStride
+            }
+        }
+        output.position(0)
+    }
+
+    companion object {
+        private val READ_Y_BUFFER: Method = BarcodeReader::class.java.getDeclaredMethod(
+            "readYBuffer",
+            ByteBuffer::class.java,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            BarcodeReader.Options::class.java
+        ).apply { isAccessible = true }
+    }
+}

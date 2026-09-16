@@ -7,3 +7,6 @@ qr-upstream/
 *.log
 tests/integration/*.bmp
 dist/*.zip
+tests/device/
+__pycache__/
+*.pyc

@@ -114,7 +114,14 @@ public:
   Bytes frame(uint32_t seq, int layout = 4) const {
     Bytes out(20 + blockLen);
     out[0] = 0xd1;
-    out[1] = layout == 4 ? 0x0f : 0x0e;
+    // 6 is the opt-in full-refresh quad mode: one new quad per display
+    // refresh. The receiver uses this marker to keep all four tile ROIs
+    // calibrated while accepting rolling-shutter partial hits. Dual-code
+    // frames use the upstream 0x1d marker; the Android receiver already
+    // recognizes it as a two-code systematic stream.
+    out[1] = layout == 6 ? 0x1f
+                         : (layout == 4 ? 0x0f
+                                        : (layout == 2 ? 0x1d : 0x0e));
     put(out, 2, session, 2);
     put(out, 4, seq, 4);
     put(out, 8, k, 2);

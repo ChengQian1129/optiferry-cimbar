@@ -6,10 +6,14 @@ if [[ ! -d /mnt/wslg ]]; then echo 'ERROR: WSLg GUI support is required.' >&2; e
 if [[ $(id -u) -eq 0 ]]; then admin=(); else admin=(sudo); fi
 "${admin[@]}" apt-get update
 "${admin[@]}" apt-get install -y build-essential cmake pkg-config libsdl2-dev libsdl2-ttf-dev libssl-dev fonts-dejavu-core
-cmake -S "$root/wsl-sender" -B "$root/build/wsl" -DCMAKE_BUILD_TYPE=Release
-cmake --build "$root/build/wsl" --parallel 2
-ctest --test-dir "$root/build/wsl" --output-on-failure
-install -Dm755 "$root/build/wsl/qsend" "$HOME/.local/bin/qsend"
+# Keep the installer's build tree on WSL's native filesystem. The source tree
+# may be opened from /mnt/c, but installation itself should not need a
+# Windows-mounted build directory.
+export OPTIFERRY_BUILD_ROOT="${OPTIFERRY_BUILD_ROOT:-$HOME/.cache/optiferry-build}"
+cmake -S "$root/wsl-sender" -B "$OPTIFERRY_BUILD_ROOT/wsl" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$OPTIFERRY_BUILD_ROOT/wsl" --parallel 2
+ctest --test-dir "$OPTIFERRY_BUILD_ROOT/wsl" --output-on-failure
+install -Dm755 "$OPTIFERRY_BUILD_ROOT/wsl/qsend" "$HOME/.local/bin/qsend"
 "$HOME/.local/bin/qsend" --selftest
 printf '\nInstalled: %s/.local/bin/qsend\n' "$HOME"
 # Make the documented qsend command available in newly opened WSL shells.

@@ -53,8 +53,25 @@ int main() {
     check(qr.getSize() == 149);
     check(qr.getMask() == 4);
     check((2160 - 160) / 2 / 157 == 6);
+    optiferry::Encoder fastEncoder(optiferry::Bytes(100, 7), 1445, 0x1234);
+    auto fastFrame = fastEncoder.frame(0x80000000u, 6);
+    auto fastQr = qrcodegen::QrCode::encodeSegments(
+        {qrcodegen::QrSegment::makeBytes(fastFrame)},
+        qrcodegen::QrCode::Ecc::LOW, 27, 27, 4, false);
+    check(fastFrame.size() == 1465 && fastFrame[0] == 0xd1 &&
+          fastFrame[1] == 0x1f);
+    check(fastQr.getSize() == 125);
+    check((2160 - 160) / 2 / 129 == 7);
+    optiferry::Encoder dualEncoder(optiferry::Bytes(100, 7), 2048, 0x1234);
+    auto dualFrame = dualEncoder.frame(0x80000000u, 2);
+    auto dualQr = qrcodegen::QrCode::encodeSegments(
+        {qrcodegen::QrSegment::makeBytes(dualFrame)},
+        qrcodegen::QrCode::Ecc::LOW, 33, 33, 4, false);
+    check(dualFrame.size() == 2068 && dualFrame[0] == 0xd1 &&
+          dualFrame[1] == 0x1d && dualQr.getSize() == 149 &&
+          std::min((3840 - 80) / 2, 2160 - 160) / 157 == 11);
     std::cout << "PASS: SHA-256, BFB1 roundtrip/corruption/UTF-8, 10 GiB "
-                 "metadata, V33 binary QR and 4K geometry\n";
+                 "metadata, V33/V27 binary QR, dual marker and 4K geometry\n";
     return 0;
   } catch (const std::exception &e) {
     std::cerr << "FAIL: " << e.what() << '\n';

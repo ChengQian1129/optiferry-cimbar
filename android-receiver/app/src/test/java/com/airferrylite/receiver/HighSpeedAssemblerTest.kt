@@ -62,10 +62,13 @@ class HighSpeedAssemblerTest {
             "0QwxSgoAAAAHABAAbgAAACLGYlvYyaEpAt8VTO0DeVlp+F2P"
         )
         var update = HighSpeedUpdate(false)
-        for (frame in frames) {
-            update = assembler.accept(Base64.getDecoder().decode(frame))
+        val decoded = frames.map { Base64.getDecoder().decode(it) }
+        for ((index, frame) in decoded.withIndex()) {
+            update = assembler.accept(frame)
             assertNull(update.error)
+            assertTrue("frame $index must be new", update.newFrame)
         }
+        assertTrue("a repeated sequence must be reported as duplicate", !assembler.accept(decoded.first()).newFrame)
         val file = update.complete
         assertNotNull(file)
         assertTrue(update.solvedBlocks == update.totalBlocks)

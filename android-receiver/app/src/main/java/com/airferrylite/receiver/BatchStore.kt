@@ -37,6 +37,7 @@ class BatchStore(private val context: Context) {
         j.put("updated",System.currentTimeMillis())
         stateFile(id).write(j.toString().toByteArray(Charsets.UTF_8))
     }
+    @Synchronized
     fun completedFrame(bytes: ByteArray): Boolean {
         if (!loaded) {
             root.listFiles()?.filter { it.name.endsWith(".json") }?.forEach { file ->
@@ -67,11 +68,39 @@ class BatchStore(private val context: Context) {
                 Progress(j.getString("name"),size,received,j.getInt("count"),bits.cardinality(),State.SCANNING,j.getString("mode"),System.currentTimeMillis()-j.getLong("created"))
             } catch (_:Exception) { null }
         }
+
+    /** Clears published batches when the user explicitly chooses "clear and receive again". */
+    @Synchronized
+    fun clearCompletedBatches(): Int {
+        var cleared = 0
+        root.listFiles().orEmpty().filter { it.name.endsWith(".json") }.forEach { file ->
+            try {
+                val id = file.name.removeSuffix(".json")
+                val j = read(id) ?: return@forEach
+                if (j.optString("status") != State.COMPLETE.name) return@forEach
+                val uriDeleted = j.optString("uri").takeIf { it.isNotBlank() }?.let {
+                    try { resolver.delete(Uri.parse(it), null, null) >= 0 } catch (_: Exception) { false }
+                } ?: true
+                if (!uriDeleted) return@forEach
+                if (!file.delete()) return@forEach
+                File(root, "$id.staging").delete()
+                cleared++
+            } catch (_: Exception) { }
+        }
+        known.clear()
+        loaded = false
+        return cleared
+    }
     private fun initial(s: BatchSegment): JSONObject {
-        val available=StatFs(context.filesDir.absolutePath).availableBytes
-        if(s.fileSize > available - 16L*1024*1024) {
+        // The normal path writes directly to the MediaStore volume. Do not
+        // require a second full copy in filesDir unless the direct probe
+        // actually fails and staging fallback is needed.
+        val externalAvailable = runCatching {
+            StatFs(Environment.getExternalStorageDirectory().absolutePath).availableBytes
+        }.getOrDefault(Long.MAX_VALUE)
+        if (!hasStorageHeadroom(s.fileSize, externalAvailable)) {
             state=State.STORAGE_FULL
-            throw IOException("STORAGE_FULL: Required ${s.fileSize}, available $available")
+            throw IOException("STORAGE_FULL: Required ${s.fileSize}, external available $externalAvailable")
         }
         val values=ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME,s.name)
@@ -87,6 +116,14 @@ class BatchStore(private val context: Context) {
             Os.ftruncate(p.fileDescriptor,s.fileSize)
             Os.fsync(p.fileDescriptor)
         } } catch (_: Exception) { mode="Staging fallback" }
+        if (mode != "Direct") {
+            val internalAvailable = StatFs(context.filesDir.absolutePath).availableBytes
+            if (!hasStorageHeadroom(s.fileSize, internalAvailable)) {
+                resolver.delete(uri,null,null)
+                state=State.STORAGE_FULL
+                throw IOException("STORAGE_FULL: Required ${s.fileSize}, app-private staging available $internalAvailable")
+            }
+        }
         val j=JSONObject().put("version",1).put("batch",s.batch).put("salt",s.salt)
             .put("name",s.name).put("size",s.fileSize).put("whole",Bfb1.hex(s.wholeSha))
             .put("count",s.count).put("segmentSize",s.segmentSize).put("uri",uri.toString())
@@ -98,10 +135,13 @@ class BatchStore(private val context: Context) {
         } catch(e:Exception) { resolver.delete(uri,null,null); throw e }
         return j
     }
+    private fun hasStorageHeadroom(required: Long, available: Long): Boolean =
+        required >= 0L && available >= 16L * 1024 * 1024 && required <= available - 16L * 1024 * 1024
     private fun metadataMatches(j: JSONObject,s: BatchSegment) = j.getInt("version")==1 &&
         j.getString("batch")==s.batch && j.getLong("salt")==s.salt && j.getString("name")==s.name &&
         j.getLong("size")==s.fileSize && j.getString("whole")==Bfb1.hex(s.wholeSha) &&
         j.getInt("count")==s.count && j.getInt("segmentSize")==s.segmentSize
+    @Synchronized
     fun commit(s: BatchSegment, frameKey: String): Progress {
         state=State.COMMITTING_SEGMENT
         val j=read(s.batch) ?: initial(s)

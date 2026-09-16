@@ -18,6 +18,17 @@ sha256sum 512m.bin
 qsend 512m.bin
 ```
 
+For repeatable test inputs and independent verification, use the repository helper:
+
+```bash
+node scripts/device-fixtures.mjs generate tests/device
+# after receiving, copy Download/OptiFerry files into tests/device-received
+node scripts/device-fixtures.mjs verify tests/device tests/device-received
+```
+
+The generator refuses to overwrite an existing directory entry. Keep the generated
+`manifest.json` beside the source files; verification fails if the source changed.
+
 Record the source hash. Confirm the receiver reports SHA-256 verified and the saved file is in Download/OptiFerry. Independently hash the saved file after testing if possible.
 
 For 100/512 MiB, after Start there must be zero Save / Continue / Next / Confirm / Choose directory actions. Any such action is a P0 failure.
@@ -36,8 +47,12 @@ For 100/512 MiB, after Start there must be zero Save / Continue / Next / Confirm
 
 ## Performance
 
-Use 20 MiB, same framing, four codes, 2068-byte frames, 30 symbol sets/s. Run stock sender + stock receiver three times, then qsend + OptiFerry three times.
+Use 20 MiB, same framing, four codes, 2068-byte frames, 30 symbol sets/s. Run stock sender + stock receiver three times, then qsend + OptiFerry three times. Separately compare qsend `--fast` (1465-byte V27 frames, one refresh per set) three times; do not combine the two profiles in one median.
 Compare median **completed useful file bytes / elapsed time**, not QR bytes emitted. Target is at least 90% of stock median; 180 KiB/s is a stretch goal.
 Record camera FPS, QR/frame, calibrated slots, app RSS, elapsed time, useful rate, retry passes and sender presentation metrics.
 
-The current development environment has measured approximately 54–60 app presents/s depending on window size/driver; this does not establish target-phone throughput or physical scanout synchronization.
+For the optical-transition A/B, run qsend `--stable-lanes` three times with the same file and framing. This keeps four V33/2068-byte codes but changes only one diagonal pair per display update. Compare its new-sequence rate and completed useful goodput against the normal four-code profile; do not call the pair-update count a four-code set rate.
+
+For the Android dual-layout A/B, run qsend `--dual` three times with the same file. This displays two enlarged horizontal V33/2068-byte codes and defaults to one refresh per pair. Compare its new-sequence rate and completed useful goodput against normal four-code and `--fast`; record whether both dual slots remain calibrated. Do not compare QR hits alone, and do not use the web receiver for this profile.
+
+The current development environment has measured approximately 54–60 app presents/s depending on window size/driver; a controlled Windows Desktop Duplication sample of the WSLg OpenGL fast path observed about 31 distinct screen contents/s on a 60 Hz desktop. Neither number establishes target-phone throughput or panel scanout synchronization.

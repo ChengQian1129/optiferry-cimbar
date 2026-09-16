@@ -6,6 +6,7 @@
 #include <chrono>
 #include <ctime>
 #include <deque>
+#include <filesystem>
 #include <iomanip>
 #include <map>
 #include <sstream>
@@ -31,10 +32,38 @@ struct Display {
   bool stopped = false, paused = false, overlay = true, fullscreen;
   std::deque<double> intervals;
   double previous = 0, deadline = 0;
-  uint64_t late = 0, presents = 0;
+  uint64_t late = 0, presents = 0, symbolsCalls = 0;
+  double symbolSeconds = 0;
   int width = 0, height = 0, module = 0;
+  const bool highFpsProfile;
+  const bool stableLaneProfile;
+  const bool dualProfile;
+  const int qrVersion;
+  const int qrModules;
+  const int quietModules;
+  const int tileModules;
+  const int frameBytes;
+  const uint32_t refreshesPerSet;
+  const int codeCount;
+  double pacingHz = 60.0;
   std::string rendererName;
-  Display(bool windowed) : fullscreen(!windowed) {
+  Display(bool windowed, bool highFps = false, uint32_t repeats = 2,
+          bool stableLanes = false, bool dual = false)
+      : fullscreen(!windowed), highFpsProfile(highFps),
+        stableLaneProfile(stableLanes),
+        dualProfile(dual),
+        qrVersion(highFps ? 27 : 33), qrModules(qrVersion * 4 + 17),
+        quietModules(highFps ? 2 : 4),
+        tileModules(qrModules + quietModules * 2),
+        frameBytes(highFps ? 1465 : 2068), refreshesPerSet(repeats),
+        codeCount(dual ? 2 : 4) {
+    // WSLg exposes both Wayland and XWayland. On this host the direct
+    // Wayland/Mesa path falls back to a very slow Zink renderer, while
+    // XWayland uses the working accelerated OpenGL path. Keep an explicit
+    // user override, but make the efficient WSLg path the default.
+    if (!std::getenv("SDL_VIDEODRIVER") &&
+        std::filesystem::exists("/mnt/wslg") && std::getenv("DISPLAY"))
+      SDL_setenv("SDL_VIDEODRIVER", "x11", 0);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
       throw std::runtime_error(std::string("WSLg display is unavailable: ") +
@@ -60,6 +89,11 @@ struct Display {
     if (!font)
       throw std::runtime_error("DejaVu Sans font missing; run install-wsl.sh");
     geometry();
+    const int display = SDL_GetWindowDisplayIndex(window);
+    SDL_DisplayMode mode{};
+    if (display >= 0 && SDL_GetCurrentDisplayMode(display, &mode) == 0 &&
+        mode.refresh_rate >= 30 && mode.refresh_rate <= 240)
+      pacingHz = mode.refresh_rate;
   }
   ~Display() {
     for (auto &[y, t] : textCache)
@@ -79,9 +113,13 @@ struct Display {
   }
   void geometry() {
     SDL_GetRendererOutputSize(renderer, &width, &height);
-    module = std::min((width - 80) / 2, (height - 160) / 2) / 157;
+    const int horizontalBudget = (width - 80) / 2;
+    const int verticalBudget = dualProfile ? height - 160 : (height - 160) / 2;
+    module = std::min(horizontalBudget, verticalBudget) / tileModules;
     if (module < 1)
-      throw std::runtime_error("Display is too small for four QR codes");
+      throw std::runtime_error(dualProfile
+                                   ? "Display is too small for dual QR codes"
+                                   : "Display is too small for four QR codes");
   }
   void events() {
     SDL_Event e;
@@ -113,23 +151,29 @@ struct Display {
     }
   }
   void symbols(const std::array<Bytes, 4> &frames) {
-    for (int slot = 0; slot < 4; slot++) {
+    const double started = rawTime();
+    for (int slot = 0; slot < codeCount; slot++) {
       auto qr = qrcodegen::QrCode::encodeSegments(
           {qrcodegen::QrSegment::makeBytes(frames[slot])},
-          qrcodegen::QrCode::Ecc::LOW, 33, 33, 4, false);
-      std::vector<uint32_t> pixels(157 * 157, 0xffffffffu);
-      for (int y = 0; y < 149; y++)
-        for (int x = 0; x < 149; x++)
+          qrcodegen::QrCode::Ecc::LOW, qrVersion, qrVersion, 4, false);
+      std::vector<uint32_t> pixels(tileModules * tileModules, 0xffffffffu);
+      for (int y = 0; y < qrModules; y++)
+        for (int x = 0; x < qrModules; x++)
           if (qr.getModule(x, y))
-            pixels[(y + 4) * 157 + x + 4] = 0xff000000u;
+            pixels[(y + quietModules) * tileModules + x + quietModules] =
+                0xff000000u;
       if (!textures[slot])
         textures[slot] = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
-                                           SDL_TEXTUREACCESS_STATIC, 157, 157);
+                                           SDL_TEXTUREACCESS_STATIC, tileModules,
+                                           tileModules);
       if (!textures[slot] || SDL_UpdateTexture(textures[slot], nullptr,
-                                               pixels.data(), 157 * 4) != 0)
+                                               pixels.data(), tileModules * 4) !=
+                                                     0)
         throw std::runtime_error(SDL_GetError());
       SDL_SetTextureScaleMode(textures[slot], SDL_ScaleModeNearest);
     }
+    symbolSeconds += rawTime() - started;
+    symbolsCalls++;
   }
   double hz() const {
     double sum = 0;
@@ -162,9 +206,11 @@ struct Display {
     events();
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
-    int side = 157 * module, gap = 20, left = (width - 2 * side - gap) / 2,
-        top = 100 + (height - 100 - 2 * side - gap) / 2;
-    for (int s = 0; s < 4; s++)
+    int side = tileModules * module, gap = 20,
+        rows = dualProfile ? 1 : 2,
+        left = (width - 2 * side - gap) / 2,
+        top = 100 + (height - 100 - rows * side - (rows - 1) * gap) / 2;
+    for (int s = 0; s < codeCount; s++)
       if (textures[s]) {
         SDL_Rect r{left + (s % 2) * (side + gap), top + (s / 2) * (side + gap),
                    side, side};
@@ -174,7 +220,12 @@ struct Display {
     if (overlay) {
       std::ostringstream s;
       s << std::fixed << std::setprecision(1) << "Present " << hz()
-        << " Hz | Symbol " << hz() / 2 << " sets/s | Late "
+        << " Hz | "
+        << (dualProfile ? "Dual " : (stableLaneProfile ? "Pair " : "Symbol "))
+        << hz() / refreshesPerSet
+        << (dualProfile ? " pairs/s | Late "
+                        : (stableLaneProfile ? " updates/s | Late "
+                                              : " sets/s | Late "))
         << (presents ? 100. * late / presents : 0) << "% | " << module
         << " px/module | "
         << (paused ? "PAUSED"
@@ -201,7 +252,7 @@ struct Display {
     double now = rawTime();
     if (!deadline)
       deadline = now;
-    deadline += 1. / 60;
+    deadline += 1. / pacingHz;
     if (now - before < .008 && now < deadline) {
       std::this_thread::sleep_for(
           std::chrono::duration<double>(deadline - now));
@@ -215,7 +266,7 @@ struct Display {
       if (dt > 1. / 55)
         late++;
     }
-    if (now > deadline + 1. / 60)
+    if (now > deadline + 1. / pacingHz)
       deadline = now;
     previous = now;
     presents++;
@@ -224,13 +275,20 @@ struct Display {
     auto v = std::vector<double>(intervals.begin(), intervals.end());
     std::sort(v.begin(), v.end());
     out << "framebuffer=" << width << 'x' << height << " module=" << module
+        << " layout=" << (dualProfile ? "dual" : "quad") << " codes="
+        << codeCount << " QR=V" << qrVersion << '/' << qrModules << " quiet="
+        << quietModules << " frame=" << frameBytes << "B"
         << " SDL=" << SDL_GetCurrentVideoDriver()
         << " renderer=" << rendererName << " effectiveHz=" << hz();
     if (!v.empty())
       out << " p50=" << v[v.size() / 2] * 1000
           << " p95=" << v[size_t((v.size() - 1) * .95)] * 1000
           << " p99=" << v[size_t((v.size() - 1) * .99)] * 1000;
-    out << " ms late=" << late << '/' << presents << '\n';
+    out << " ms late=" << late << '/' << presents << " symbols="
+        << symbolsCalls << " symbolAvgMs="
+        << (symbolsCalls ? 1000 * symbolSeconds / symbolsCalls : 0)
+        << " refreshesPerSet=" << refreshesPerSet
+        << " stableLanes=" << stableLaneProfile << '\n';
   }
 };
 } // namespace optiferry

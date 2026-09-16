@@ -1,0 +1,48 @@
+diff --git a/src/lib/gui/gl_2d_display.h b/src/lib/gui/gl_2d_display.h
+index 01bcd2f..f9d9e9d 100644
+--- a/src/lib/gui/gl_2d_display.h
++++ b/src/lib/gui/gl_2d_display.h
+@@ -17,9 +17,10 @@ class gl_2d_display_program
+ protected:
+ 	static constexpr const char* VERTEX_SHADER_SRC = R"(
++	#version 330 core
+ 	uniform mat2 rot;
+ 	uniform vec2 tform;
+-	attribute vec4 vert;
+-	varying vec2 texCoord;
++	in vec4 vert;
++	out vec2 texCoord;
+ 	void main() {
+ 	   gl_Position = vec4(vert.x, vert.y, 0.0, 1.0);
+ 	   vec2 ori = vec2(vert.x, vert.y);
+@@ -31,9 +32,10 @@ protected:
+ 	static constexpr const char* FRAGMENT_SHADER_SRC = R"(
+-	precision mediump float;
++	#version 330 core
+ 	uniform sampler2D tex;
+-	varying vec2 texCoord;
++	in vec2 texCoord;
++	out vec4 fragColor;
+ 	void main() {
+-	   gl_FragColor = texture2D(tex, texCoord);
++	   fragColor = texture(tex, texCoord);
+ 	})";
+ 
+ public:
+diff --git a/src/lib/gui/window_glfw.h b/src/lib/gui/window_glfw.h
+index 01bcd2f..d345e88 100644
+--- a/src/lib/gui/window_glfw.h
++++ b/src/lib/gui/window_glfw.h
+@@ -33,6 +33,12 @@ public:
+ #ifdef CIMBAR_USE_ANGLE
+ 		glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+ 		glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
+ 		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+ 		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
++#else
++		// WSLg exposes a modern desktop OpenGL context. Request it explicitly so
++		// the Linux sender does not fall back to an incompatible legacy default.
++		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
++		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
++		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+ #endif

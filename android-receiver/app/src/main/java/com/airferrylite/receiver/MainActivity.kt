@@ -29,6 +29,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import com.google.android.material.button.MaterialButtonToggleGroup
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AlertDialog
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -49,6 +50,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.io.File
 
 @OptIn(ExperimentalCamera2Interop::class)
 class MainActivity : AppCompatActivity() {
@@ -77,13 +79,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var protocolExecutor: ExecutorService
     private val assembler = TransferAssembler()
-    private val highSpeedAssembler = HighSpeedAssembler()
+    private val highSpeedAssembler by lazy { HighSpeedAssembler(File(filesDir, "optiferry-highspeed")) }
     private val batchStore by lazy { BatchStore(applicationContext) }
     @Volatile private var batchProgress: BatchStore.Progress? = null
     @Volatile private var batchStopped = false
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraStarted = false
-    private var lastHighFrameCount = 0
     private var lastHighUiAt = 0L
     private var speedWindowStartedAt = 0L
     private var speedWindowBytes = 0L
@@ -110,13 +111,12 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var highLastUniqueAt = 0L
     @Volatile private var highLastSolvedAt = 0L
     @Volatile private var invalidFrameSample = "—"
-    private var lastHighUnique = 0
     private var lastHighSolved = 0
     private var lastHighTotal = 0
     private var activeCameraFps: Range<Int>? = null
     private var availableCameraFpsLabel = "未知"
     private var highSpeedCameraFpsLabel = "未开放"
-    @Volatile private var latestSpeedLabel = "实时 — · 平均 —"
+    @Volatile private var latestSpeedLabel = "新码实时 — · 新码平均 —"
     @Volatile private var highSpeedSessionActive = false
     private var requestedFps = 60
     private var fullDiagnostics = ""
@@ -235,7 +235,7 @@ class MainActivity : AppCompatActivity() {
         startReceiveButton.setOnClickListener { requestStartReceive() }
         findViewById<Button>(R.id.continueReceiveButton).setOnClickListener { continueReceive() }
         findViewById<Button>(R.id.resultSaveButton).setOnClickListener { savePendingFile() }
-        resetButton.setOnClickListener { resetTransfer() }
+        resetButton.setOnClickListener { confirmResetTransfer() }
         cameraExecutor = Executors.newSingleThreadExecutor()
         protocolExecutor = Executors.newSingleThreadExecutor()
         frameAnalyzer = QrFrameAnalyzer(
@@ -459,7 +459,6 @@ class MainActivity : AppCompatActivity() {
         highLastFrameAt = 0
         highLastUniqueAt = 0
         highLastSolvedAt = 0
-        lastHighUnique = 0
         lastHighSolved = 0
         lastHighTotal = 0
         quadCalibrationReadyAt = 0L
@@ -887,9 +886,11 @@ class MainActivity : AppCompatActivity() {
         if (update.solvedBlocks > lastHighSolved) highLastSolvedAt = now
         lastHighSolved = update.solvedBlocks
         lastHighTotal = update.totalBlocks
-        if (update.receivedFrames > lastHighUnique) {
-            highUniqueFrameCount += (update.receivedFrames - lastHighUnique).toLong()
-            lastHighUnique = update.receivedFrames
+        if (update.newFrame) {
+            // receivedFrames belongs to the currently active decoder and can
+            // move backwards when the sender changes logical segments. Count
+            // the event itself so the session speed remains monotonic.
+            highUniqueFrameCount += 1
             highLastUniqueAt = now
             if (highUniqueFrameCount >= HAL_WARMUP_MIN_UNIQUE) {
                 receiveSessionFromContinue = false
@@ -903,15 +904,13 @@ class MainActivity : AppCompatActivity() {
                 val result = batchStore.commit(segment, batchStore.frameKey(bytes)!!)
                 batchProgress = result
                 if (result.state == BatchStore.State.COMPLETE) batchStopped = true
-                highSpeedAssembler.reset()
-                lastHighUnique = 0
+                highSpeedAssembler.resetCurrent()
                 lastHighSolved = 0
-                lastHighFrameCount = 0
                 ContextCompat.getMainExecutor(this).execute {
                     fileText.text = "${result.name} · ${formatBytes(result.size)}"
                     progress.progress = if (result.size == 0L) 100 else (result.received * 100 / result.size).toInt()
                     missingText.text = "Segments ${result.done}/${result.count} · ${formatBytes(result.received)}/${formatBytes(result.size)} · ${result.storage}"
-                    speedText.text = "Useful average ${formatRate(result.received * 1000.0 / result.elapsedMs.coerceAtLeast(1))} · $latestSpeedLabel"
+                    speedText.text = "文件平均 ${formatRate(result.received * 1000.0 / result.elapsedMs.coerceAtLeast(1))} · $latestSpeedLabel"
                     statusText.maxLines = 3
                     statusText.text = if (result.state == BatchStore.State.COMPLETE) "✓ Transfer complete · SHA-256 verified\nDownload/OptiFerry/" else "接收中：自动保存，继续扫描"
                     if (result.state == BatchStore.State.COMPLETE) {
@@ -921,7 +920,7 @@ class MainActivity : AppCompatActivity() {
                     renderDiagnostics()
                 }
             } catch (error: Exception) {
-                highSpeedAssembler.reset()
+                highSpeedAssembler.resetCurrent()
                 ContextCompat.getMainExecutor(this).execute {
                     statusText.text = error.message ?: "Batch storage error"
                     if (error is java.io.IOException || error is android.system.ErrnoException) {
@@ -942,20 +941,32 @@ class MainActivity : AppCompatActivity() {
         }
         val framePercent = if (expectedFrames == 0) 0 else update.receivedFrames * 100 / expectedFrames
         val solvePercent = if (update.totalBlocks == 0) 0 else update.solvedBlocks * 100 / update.totalBlocks
-        val percent = minOf(99, maxOf(framePercent, solvePercent))
+        val segmentPercent = minOf(99, maxOf(framePercent, solvePercent))
+        // The decoder counters describe only the currently active BFB1
+        // segment. They restart when the sender moves to the next segment,
+        // so they must not drive the whole-file progress bar.
+        val durablePercent = batchProgress?.let {
+            if (it.size <= 0L) 100 else (it.received * 100 / it.size).toInt().coerceIn(0, 100)
+        } ?: 0
         ContextCompat.getMainExecutor(this).execute {
             fileText.text = if (file != null) "${file.name} · ${formatBytes(file.bytes.size.toLong())}" else batchProgress?.let { "${it.name} · ${formatBytes(it.received)}/${formatBytes(it.size)} · Segments ${it.done}/${it.count}" } ?: "高速文件流"
-            progress.progress = if (file != null) 100 else percent
+            // Only show durable bytes here. The old fallback to segmentPercent
+            // made the bar jump back to 0% at every segment boundary.
+            progress.progress = if (file != null) 100 else durablePercent
             speedText.text = latestSpeedLabel
             missingText.text = if (file != null) {
                 "SHA-256 校验通过"
+            } else if (batchProgress != null) {
+                "已持久化：${batchProgress!!.done}/${batchProgress!!.count} 段 · ${formatBytes(batchProgress!!.received)}/${formatBytes(batchProgress!!.size)}\n" +
+                    "当前段唯一包：${update.receivedFrames}/约$expectedFrames（$framePercent%）· 解块：${update.solvedBlocks}/${update.totalBlocks}（$solvePercent%）"
             } else {
                 "唯一包：${update.receivedFrames}/约$expectedFrames（$framePercent%）· 解块：${update.solvedBlocks}/${update.totalBlocks}（$solvePercent%）"
             }
             statusText.text = when {
                 update.error != null -> update.error
                 file != null -> "接收完成，点「保存文件」"
-                else -> "高速接收中：$percent%"
+                batchProgress != null -> "高速接收中：已持久化 ${durablePercent}%（当前段 ${segmentPercent}%）"
+                else -> "高速接收中：等待首段提交（当前段 ${segmentPercent}%）"
             }
             renderDiagnostics()
         }
@@ -967,13 +978,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateSpeed(update: HighSpeedUpdate, payloadBytes: Int, now: Long) {
-        if (update.receivedFrames < lastHighFrameCount) resetSpeed()
-        val newFrames = update.receivedFrames - lastHighFrameCount
-        lastHighFrameCount = update.receivedFrames
-        if (newFrames <= 0) return
+        if (!update.newFrame) return
         if (sessionStartedAt == 0L) sessionStartedAt = now
         if (speedWindowStartedAt == 0L) speedWindowStartedAt = now
-        val added = newFrames.toLong() * payloadBytes.coerceAtLeast(0)
+        val added = payloadBytes.coerceAtLeast(0).toLong()
         sessionUniquePayloadBytes += added
         speedWindowBytes += added
         val elapsed = now - speedWindowStartedAt
@@ -987,7 +995,7 @@ class MainActivity : AppCompatActivity() {
         for (index in 0 until rollingCount) rollingSum += rollingRates[index]
         val rolling = rollingSum / rollingCount
         sessionAverageBytesPerSecond = sessionUniquePayloadBytes * 1000.0 / (now - sessionStartedAt).coerceAtLeast(1)
-        latestSpeedLabel = "实时 ${formatRate(speedBytesPerSecond)} · 平均 ${formatRate(rolling)}"
+        latestSpeedLabel = "新码实时 ${formatRate(speedBytesPerSecond)} · 新码平均 ${formatRate(rolling)}"
         speedWindowStartedAt = now
         speedWindowBytes = 0
     }
@@ -1006,14 +1014,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun confirmResetTransfer() {
+        AlertDialog.Builder(this)
+            .setTitle("清空已完成文件？")
+            .setMessage("这会删除已完成的 OptiFerry 文件，并重新扫描当前发送批次。未完成的断点进度会保留。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("清空并重收") { _, _ -> resetTransfer() }
+            .show()
+    }
+
     private fun resetTransfer() {
+        // This button means a deliberate fresh receive. Remove completed output
+        // so replaying the same sender batch is accepted instead of being skipped.
+        statusText.text = "正在清理已完成文件…"
         batchStopped = false
         protocolEpoch.incrementAndGet()
         assembler.reset()
-        protocolExecutor.execute { highSpeedAssembler.reset() }
+        protocolExecutor.execute {
+            highSpeedAssembler.reset()
+            val cleared = batchStore.clearCompletedBatches()
+            ContextCompat.getMainExecutor(this).execute {
+                if (!isDestroyed) {
+                    statusText.text = if (cleared > 0) "已清空 $cleared 个文件，正在高速扫描" else "正在高速扫描"
+                }
+            }
+        }
         highSpeedSessionActive = false
         pendingSave = null
         pendingSession = null
+        batchProgress = null
         saveButton.isEnabled = false
         lastHighUiAt = 0
         resetSpeed()
@@ -1033,7 +1062,6 @@ class MainActivity : AppCompatActivity() {
         lastQuadSlotHits.fill(0L)
         invalidFrameCount.set(0)
         invalidFrameSample = "—"
-        lastHighUnique = 0
         lastHighSolved = 0
         lastHighTotal = 0
         frameAnalyzer.consumeRecoverRequest()
@@ -1060,7 +1088,7 @@ class MainActivity : AppCompatActivity() {
         updateUi(TransferUpdate(null, 0, 0))
         fileText.text = "等待文件"
         progress.progress = 0
-        speedText.text = "实时 — · 平均 —"
+        speedText.text = "新码实时 — · 新码平均 —"
         missingText.text = "缺失片段：—"
         statusText.text = "正在高速扫描"
         if (::resultImage.isInitialized) {
@@ -1080,6 +1108,10 @@ class MainActivity : AppCompatActivity() {
         if (now - lastRecoverAt < RECOVER_COOLDOWN_MS) return
         val asked = frameAnalyzer.consumeRecoverRequest()
         val heartbeatDead = lastStatsAt != 0L && now - lastStatsAt > SCAN_STALL_MS
+        if (highFrameCount == 0L && scanSessionStartedAt != 0L &&
+            now - scanSessionStartedAt > NO_FRAME_HINT_MS) {
+            statusText.text = "正在等待二维码，请将四个码完整对准相机"
+        }
         if (heartbeatDead || asked) {
             frameAnalyzer.replaceDecoders()
             if (heartbeatDead) statusText.text = "解码已重建，未重绑相机"
@@ -1238,7 +1270,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetSpeed() {
-        lastHighFrameCount = 0
         speedWindowStartedAt = 0
         speedWindowBytes = 0
         speedBytesPerSecond = 0.0
@@ -1251,7 +1282,7 @@ class MainActivity : AppCompatActivity() {
         rollingCount = 0
         rollingIndex = 0
         rollingRates.fill(0.0)
-        latestSpeedLabel = "实时 — · 平均 —"
+        latestSpeedLabel = "新码实时 — · 新码平均 —"
     }
 
     private fun saveFile(name: String, mime: String, bytes: ByteArray): String? {
@@ -1384,6 +1415,7 @@ class MainActivity : AppCompatActivity() {
         private const val UNIQUE_STALL_LABEL_MS = 1_800L
         private const val SOLVE_STALL_LABEL_MS = 1_800L
         private const val WATCHDOG_INTERVAL_MS = 1000L
+        private const val NO_FRAME_HINT_MS = 5000L
         private const val SCAN_STALL_MS = 2000L
         private const val RECOVER_COOLDOWN_MS = 5000L
         private const val RECOVER_BURST_WINDOW_MS = 30000L

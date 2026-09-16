@@ -4,18 +4,11 @@ param(
 )
 
 $root = Split-Path -Parent $PSScriptRoot
-$sdk = Join-Path $root ".tools\android-sdk"
-$gradle = Join-Path $root ".tools\gradle\gradle-8.9\bin\gradle.bat"
-if (!(Test-Path -LiteralPath $sdk)) { throw "Android SDK not found: $sdk" }
-if (!(Test-Path -LiteralPath $gradle)) { throw "Gradle 8.9 not found: $gradle" }
-
-$env:GRADLE_USER_HOME = Join-Path $root ".tools\gradle-home"
-$env:ANDROID_USER_HOME = Join-Path $root ".tools\android-home"
-$env:ANDROID_SDK_ROOT = $sdk
-$env:ANDROID_HOME = $sdk
-New-Item -ItemType Directory -Force -Path $env:GRADLE_USER_HOME, $env:ANDROID_USER_HOME | Out-Null
-$javaHomeOption = "-Duser.home=$env:ANDROID_USER_HOME"
-$env:JAVA_TOOL_OPTIONS = if ($env:JAVA_TOOL_OPTIONS) { "$javaHomeOption $env:JAVA_TOOL_OPTIONS" } else { $javaHomeOption }
-
-& $gradle --no-daemon @GradleArgs
+if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+  throw "WSL is required. This entry point intentionally avoids C: drive build caches."
+}
+$wslRoot = (& wsl.exe wslpath -a -- $root).Trim()
+$argsText = ($GradleArgs | ForEach-Object { "'" + ($_ -replace "'", "'\\''") + "'" }) -join " "
+$command = "export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64; export ANDROID_HOME=/mnt/f/optiferry-storage/android-sdk; export ANDROID_SDK_ROOT=/mnt/f/optiferry-storage/android-sdk; export OPTIFERRY_ANDROID_BUILD_ROOT=`$HOME/.cache/optiferry-android-build; export GRADLE_USER_HOME=`$HOME/.gradle; export ANDROID_USER_HOME=`$HOME/.android; export OPTIFERRY_GRADLE=/mnt/f/optiferry-storage/android-sdk/gradle-8.9/bin/gradle; cd '$wslRoot/android-receiver'; bash '$wslRoot/scripts/build-android.sh' $argsText"
+& wsl.exe bash -lc $command
 exit $LASTEXITCODE

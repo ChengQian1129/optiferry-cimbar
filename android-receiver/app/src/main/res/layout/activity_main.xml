@@ -273,7 +273,7 @@
         android:ellipsize="end"
         android:maxLines="1"
         android:paddingTop="2dp"
-        android:text="实时 — · 平均 —"
+        android:text="新码实时 — · 新码平均 —"
         android:textColor="@color/af_text"
         android:textSize="11sp" />
 

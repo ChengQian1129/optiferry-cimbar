@@ -2,7 +2,12 @@ package com.airferrylite.receiver
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.EOFException
+import java.io.File
+import java.io.RandomAccessFile
 import java.security.MessageDigest
+import java.util.LinkedHashMap
 import java.util.zip.GZIPInputStream
 import kotlin.math.ceil
 import kotlin.math.max
@@ -16,12 +21,14 @@ data class HighSpeedUpdate(
     val receivedFrames: Int = 0,
     val solvedBlocks: Int = 0,
     val totalBlocks: Int = 0,
+    /** True only when this call added a new sequence to its stream decoder. */
+    val newFrame: Boolean = false,
     val complete: HighSpeedFile? = null,
     val error: String? = null
 )
 
 /** Decodes the binary AFL2 frames produced by the web high-speed sender. */
-class HighSpeedAssembler {
+class HighSpeedAssembler(private val stateRoot: File? = null) {
     companion object {
         private const val FRAME_HEADER_SIZE = 20
         private const val FILE_HEADER_SIZE = 49
@@ -34,6 +41,7 @@ class HighSpeedAssembler {
         private const val MIX_A = 0x21f0aaad
         private const val MIX_B = 0x735a2d97
         private const val FRAME_MIX = 0xc2b2ae35.toInt()
+        private const val MAX_ACTIVE_DECODERS = 4
 
         fun looksLikeFrame(bytes: ByteArray): Boolean {
             if (bytes.size <= FRAME_HEADER_SIZE || u8(bytes[0]) != 0xd1) return false
@@ -166,39 +174,121 @@ class HighSpeedAssembler {
         val quadFullRefresh60: Boolean
     )
 
+    private data class StreamState(
+        val key: String,
+        val header: FrameHeader,
+        val decoder: LtDecoder,
+        var complete: HighSpeedFile? = null
+    )
+
+    private val streams = LinkedHashMap<String, StreamState>(8, 0.75f, true)
+    private val logs = HashMap<String, RandomAccessFile>()
     private var streamKey: String? = null
-    private var header: FrameHeader? = null
-    private var decoder: LtDecoder? = null
-    private var complete: HighSpeedFile? = null
+
+    init {
+        stateRoot?.mkdirs()
+    }
 
     fun reset() {
+        logs.values.forEach { runCatching { it.close() } }
+        logs.clear()
+        streams.clear()
+        stateRoot?.listFiles()?.forEach { it.delete() }
         streamKey = null
-        header = null
-        decoder = null
-        complete = null
+    }
+
+    /** Drops only the session that produced the last completed segment. */
+    fun resetCurrent() {
+        val key = streamKey ?: return
+        streams.remove(key)
+        closeLog(key)
+        stateRoot?.let { spoolFile(key).delete() }
+        streamKey = null
     }
 
     fun accept(bytes: ByteArray): HighSpeedUpdate {
         val frame = parseFrame(bytes) ?: return snapshot(error = "高速二维码帧格式错误")
         val key = "${frame.sessionId}:${frame.blocks}:${frame.blockLength}:${frame.totalLength}:${frame.payloadFnv}:${frame.layoutCodes}:${if (frame.systematic) 1 else 0}:${if (frame.quadFullRefresh60) 1 else 0}"
-        if (streamKey != key) {
-            streamKey = key
-            header = frame
-            decoder = LtDecoder(frame.blocks, frame.blockLength, frame.sessionId, frame.totalLength)
-            complete = null
-        }
-        val activeDecoder = decoder ?: return snapshot(error = "高速接收器初始化失败")
-        activeDecoder.addFrame(frame.sequence, bytes.copyOfRange(FRAME_HEADER_SIZE, bytes.size))
-        if (activeDecoder.isComplete && complete == null) {
-            complete = try {
-                val container = activeDecoder.assemble() ?: throw IllegalStateException("高速数据尚未完整")
+        streamKey = key
+        val state = stateFor(key, frame)
+        if (state.complete != null) return snapshot(state)
+        val block = bytes.copyOfRange(FRAME_HEADER_SIZE, bytes.size)
+        val isNew = state.decoder.addFrame(frame.sequence, block)
+        if (isNew) appendLog(key, frame.sequence, block)
+        if (state.decoder.isComplete && state.complete == null) {
+            state.complete = try {
+                val container = state.decoder.assemble() ?: throw IllegalStateException("高速数据尚未完整")
                 if (fnv1a(container) != frame.payloadFnv) throw IllegalStateException("高速流校验失败")
                 if (Bfb1.isBatch(container)) HighSpeedFile("batch", "application/x-optiferry-bfb1", container) else unpackFile(container)
             } catch (error: Throwable) {
-                return snapshot(error = error.message ?: "高速文件恢复失败")
+                return snapshot(
+                    state,
+                    error = error.message ?: "高速文件恢复失败",
+                    newFrame = isNew
+                )
             }
         }
-        return snapshot()
+        return snapshot(state, newFrame = isNew)
+    }
+
+    private fun stateFor(key: String, frame: FrameHeader): StreamState {
+        streams[key]?.let { return it }
+        while (streams.size >= MAX_ACTIVE_DECODERS) {
+            val evicted = streams.entries.firstOrNull()?.key ?: break
+            if (evicted == key) break
+            streams.remove(evicted)
+            closeLog(evicted)
+        }
+        val decoder = LtDecoder(frame.blocks, frame.blockLength, frame.sessionId, frame.totalLength)
+        val file = stateRoot?.let { spoolFile(key) }
+        if (file?.isFile == true) replayLog(file, decoder, frame.blockLength)
+        return StreamState(key, frame, decoder).also { streams[key] = it }
+    }
+
+    private fun spoolFile(key: String): File {
+        val digest = MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))
+        return File(stateRoot ?: File("."), Bfb1.hex(digest) + ".frames")
+    }
+
+    private fun closeLog(key: String) {
+        logs.remove(key)?.let { runCatching { it.close() } }
+    }
+
+    private fun appendLog(key: String, sequence: Int, block: ByteArray) {
+        val root = stateRoot ?: return
+        root.mkdirs()
+        val file = spoolFile(key)
+        val log = logs.getOrPut(key) { RandomAccessFile(file, "rw") }
+        log.seek(log.length())
+        log.writeInt(Integer.reverseBytes(sequence))
+        log.writeInt(Integer.reverseBytes(block.size))
+        log.write(block)
+    }
+
+    private fun replayLog(file: File, decoder: LtDecoder, blockLength: Int) {
+        var validBytes = 0L
+        try {
+            DataInputStream(file.inputStream().buffered()).use { input ->
+                while (true) {
+                    val sequence = Integer.reverseBytes(input.readInt())
+                    val length = Integer.reverseBytes(input.readInt())
+                    if (length != blockLength || length <= 0) break
+                    val block = ByteArray(length)
+                    input.readFully(block)
+                    decoder.addFrame(sequence, block)
+                    validBytes += 8L + length
+                }
+            }
+        } catch (_: EOFException) {
+            // A process killed during the final record leaves a truncated tail.
+        } catch (_: Exception) {
+            file.delete()
+            decoder.clear()
+            return
+        }
+        if (file.length() != validBytes) {
+            runCatching { RandomAccessFile(file, "rw").use { it.setLength(validBytes) } }
+        }
     }
 
     private fun parseFrame(bytes: ByteArray): FrameHeader? {
@@ -219,16 +309,21 @@ class HighSpeedAssembler {
         return FrameHeader(sessionId, sequence, blocks, blockLength, totalLength.toInt(), payloadFnv, layoutCodes, systematic, quadFullRefresh60)
     }
 
-    private fun snapshot(error: String? = null): HighSpeedUpdate {
-        val activeDecoder = decoder
-        val activeHeader = header
+    private fun snapshot(
+        state: StreamState? = streamKey?.let { streams[it] },
+        error: String? = null,
+        newFrame: Boolean = false
+    ): HighSpeedUpdate {
+        val activeDecoder = state?.decoder
+        val activeHeader = state?.header
         return HighSpeedUpdate(
             active = activeDecoder != null,
             session = streamKey,
             receivedFrames = activeDecoder?.framesNew ?: 0,
             solvedBlocks = activeDecoder?.solvedCount ?: 0,
             totalBlocks = activeHeader?.blocks ?: 0,
-            complete = complete,
+            newFrame = newFrame,
+            complete = state?.complete,
             error = error
         )
     }
@@ -306,8 +401,8 @@ class HighSpeedAssembler {
 
         val isComplete get() = solvedCount >= blockCount
 
-        fun addFrame(sequence: Int, block: ByteArray) {
-            if (!seen.add(sequence) || isComplete) return
+        fun addFrame(sequence: Int, block: ByteArray): Boolean {
+            if (!seen.add(sequence) || isComplete) return false
             framesNew += 1
             if (blockCount <= DENSE_MAX_BLOCKS) received[sequence] = block.copyOf()
             val indexes = HighSpeedAssembler.frameIndexes(blockCount, cdf, sessionId, sequence).toMutableSet()
@@ -319,16 +414,26 @@ class HighSpeedAssembler {
             }
             if (indexes.isEmpty()) {
                 maybeDenseComplete()
-                return
+                return true
             }
             if (indexes.size == 1) {
                 resolve(indexes.first(), value)
                 maybeDenseComplete()
-                return
+                return true
             }
             val equation = Equation(indexes, value)
             for (index in indexes) byBlock.getOrPut(index) { HashSet() }.add(equation)
             maybeDenseComplete()
+            return true
+        }
+
+        fun clear() {
+            byBlock.clear()
+            seen.clear()
+            received.clear()
+            for (index in solved.indices) solved[index] = null
+            solvedCount = 0
+            framesNew = 0
         }
 
         private fun maybeDenseComplete() {

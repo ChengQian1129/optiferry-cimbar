@@ -39,9 +39,9 @@ bash scripts/install-cimbar-wsl.sh
 cimbar-send /mnt/f/wang_ct/CT_DICOM_complete.zip
 ```
 
-这个命令会自动计算哈希、按默认 10 MiB 生成彩码分片和 manifest，并调用原生 `cimbar_send` 循环播放。手机会校验每个分片和完整文件 SHA-256，完成后显示保存按钮。
+这个命令会自动计算哈希、选择分片大小、生成彩码分片和 manifest，并调用原生 `cimbar_send` 循环播放。小文件默认按 10 MiB 分片；大文件会自动增大分片，最多支持约 2.2 GiB。手机会校验每个分片和完整文件 SHA-256，完成后显示保存按钮。
 
-默认是 Mode B / 15 fps；需要实测时可以覆盖：`cimbar-send FILE --fps 20` 或 `--chunk-size 16MiB`。APK 诊断区会显示接收端实际接纳的帧率和被 native 队列丢弃的帧数；如果丢帧持续增长，应降低发送 FPS。接收端最多同时保留 8 条流且活动输入总量不超过 64 MiB，超额的新流会等待空位，不会淘汰已有分片进度。拼接和保存使用文件流，不把完整大文件读入 Java 堆。当前 OptiFerry APK 固定接收 Mode B，`Bm`、`Bu`、`4C` 仅可用于 `--prepare-only`，不能直接播放给这个 APK。分片和 manifest 默认保存在 WSL 原生文件系统的 `~/.cache/optiferry-cimbar/transfers/`。详细格式见 [protocol/OPM1.md](protocol/OPM1.md)。
+默认是 Mode B / 15 fps；分片大小自动选择。需要实测时可以覆盖帧率或手动指定更小分片：`cimbar-send FILE --fps 20` 或 `--chunk-size 16MiB`。APK 诊断区会显示接收端实际接纳的帧率和被 native 队列丢弃的帧数；如果丢帧持续增长，应降低发送 FPS。接收端最多同时保留 8 条流且活动输入总量不超过 64 MiB，超额的新流会等待空位，不会淘汰已有分片进度。拼接和保存使用文件流，不把完整大文件读入 Java 堆。当前 OptiFerry APK 固定接收 Mode B，`Bm`、`Bu`、`4C` 仅可用于 `--prepare-only`，不能直接播放给这个 APK。分片和 manifest 默认保存在 WSL 原生文件系统的 `~/.cache/optiferry-cimbar/transfers/`。详细格式见 [protocol/OPM1.md](protocol/OPM1.md)。
 
 不要用普通 `split` 手动切分；裸分片没有 manifest，手机无法知道顺序、大小和完整文件哈希。输入文件名不能是 `manifest.json`，因为这个名字保留给接收端的控制 manifest。空文件暂不支持发送。
 

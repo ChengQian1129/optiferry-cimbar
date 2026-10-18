@@ -7,7 +7,7 @@
 ```text
 cimbar-send FILE
   -> 计算完整文件 SHA-256
-  -> 按默认 10 MiB（最大 19 MiB）生成 .partNN.bin
+  -> 自动选择分片大小（默认 10 MiB，最大 19 MiB）并生成 .partNN.bin
   -> 生成 manifest.json
   -> libcimbar 依次循环播放 manifest 和所有分片
   -> OptiFerry 彩码接收端校验分片并移入私有暂存目录
@@ -66,12 +66,12 @@ cimbar-send /mnt/f/path/to/file.zip
 
 ```bash
 cimbar-send FILE --prepare-only       # 只生成并校验 manifest/分片
-cimbar-send FILE --chunk-size 16MiB   # 更小的独立 stream
+cimbar-send FILE --chunk-size 16MiB   # 手动覆盖自动选择
 cimbar-send FILE --fps 20             # 需结合屏幕和相机实测
 cimbar-send FILE --mode 4C            # 只准备分片；OptiFerry APK 当前固定接收 Mode B
 cimbar-send FILE --new-transfer       # 使用新的准备目录
 ```
 
-手机安装 `dist/OptiFerry-debug.apk` 后，选择「彩码 Cimbar」并对准发送窗口。首次使用或更新后在 WSL2 重新运行 `scripts/install-cimbar-wsl.sh`，发送器会核验自身 cadence-v2 标识。发送期间不要修改源文件；相同文件和分片大小会复用准备目录，便于重试。输入文件名不能是 `manifest.json`，这个名字由接收端保留给控制 manifest。空文件当前不支持，因为上游 sender 会跳过 0 字节输入。
+手机安装 `dist/OptiFerry-debug.apk` 后，选择「彩码 Cimbar」并对准发送窗口。首次使用或更新后在 WSL2 重新运行 `scripts/install-cimbar-wsl.sh`，发送器会核验自身 cadence-v2 标识。分片大小会自动适配文件，单次最多约 2.2 GiB；发送期间不要修改源文件，相同文件和分片大小会复用准备目录，便于重试。输入文件名不能是 `manifest.json`，这个名字由接收端保留给控制 manifest。空文件当前不支持，因为上游 sender 会跳过 0 字节输入。
 
 `protocol/OPM1.md` 文件名保留是为了兼容旧链接；当前实现以本页的 `cimbar-bigfile` manifest 为准。

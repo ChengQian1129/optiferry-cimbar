@@ -36,6 +36,30 @@ class CimbarSendTests(unittest.TestCase):
             cimbar_send.FOUNTAIN_BLOCK_ID_LIMIT,
         )
 
+    def test_chunk_size_is_selected_automatically_for_large_files(self):
+        self.assertEqual(
+            cimbar_send.select_chunk_size(100 * 1024 * 1024),
+            cimbar_send.DEFAULT_CHUNK_BYTES,
+        )
+        file_size = 1500 * 1024 * 1024
+        chunk_size = cimbar_send.select_chunk_size(file_size)
+        self.assertGreater(chunk_size, cimbar_send.DEFAULT_CHUNK_BYTES)
+        self.assertLessEqual(
+            (file_size + chunk_size - 1) // chunk_size,
+            cimbar_send.MAX_CHUNKS,
+        )
+        self.assertEqual(
+            cimbar_send.select_chunk_size(cimbar_send.MAX_ORIGINAL_BYTES),
+            cimbar_send.MAX_CHUNK_BYTES,
+        )
+
+    def test_explicit_chunk_size_is_preserved_and_validated(self):
+        self.assertEqual(cimbar_send.select_chunk_size(100, 4 * 1024 * 1024), 4 * 1024 * 1024)
+        with self.assertRaisesRegex(ValueError, "19MiB"):
+            cimbar_send.select_chunk_size(100, cimbar_send.MAX_CHUNK_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            cimbar_send.select_chunk_size(100, 0)
+
     def test_preparation_checks_free_space_before_writing_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -228,6 +252,8 @@ class CimbarSendTests(unittest.TestCase):
             source.write_bytes(b"payload")
             output = root / "chunks"
             self.assertEqual(cimbar_send.main([str(source), "--output", str(output), "--prepare-only"]), 0)
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["chunk_size"], cimbar_send.DEFAULT_CHUNK_BYTES)
             self.assertTrue((output / "manifest.json").is_file())
 
     def test_single_chunk_transfer_requires_the_cadence_managed_sender(self):

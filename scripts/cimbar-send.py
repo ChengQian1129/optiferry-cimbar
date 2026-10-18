@@ -110,6 +110,17 @@ def minimum_redundancy_frames(raw_chunk_bytes: int) -> int:
     ) // MODE_B_BLOCKS_PER_FRAME
 
 
+def select_chunk_size(file_size: int, requested_chunk_size: int | None = None) -> int:
+    if requested_chunk_size is not None:
+        if requested_chunk_size <= 0:
+            raise ValueError("chunk size must be positive")
+        if requested_chunk_size > MAX_CHUNK_BYTES:
+            raise ValueError("chunk size must be <= 19MiB to preserve two fountain-block passes")
+        return requested_chunk_size
+    required = (file_size + MAX_CHUNKS - 1) // MAX_CHUNKS
+    return max(DEFAULT_CHUNK_BYTES, min(required, MAX_CHUNK_BYTES))
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -299,7 +310,7 @@ def require_wslg() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare and play CFC-compatible Cimbar streams.")
     parser.add_argument("input", type=Path, help="file to send")
-    parser.add_argument("--chunk-size", type=parse_size, default=DEFAULT_CHUNK_BYTES, help="raw bytes per Cimbar stream (default: 10MiB; maximum: 19MiB)")
+    parser.add_argument("--chunk-size", type=parse_size, help="raw bytes per Cimbar stream (selected automatically; maximum: 19MiB)")
     parser.add_argument("--output", type=Path, help="chunk directory (default: ~/.cache/optiferry-cimbar/transfers/...)")
     parser.add_argument("--sender", help="cadence-v2 cimbar_send executable; otherwise auto-detected or CIMBAR_SEND is used")
     parser.add_argument("--fps", type=positive_int, default=15, help="sender FPS (default: 15)")
@@ -322,10 +333,6 @@ def main(argv: list[str] | None = None) -> int:
     source = args.input.expanduser().resolve()
     if not source.is_file():
         raise ValueError(f"input is not a regular file: {source}")
-    if args.chunk_size > MAX_CHUNK_BYTES:
-        raise ValueError("chunk size must be <= 19MiB to preserve two fountain-block passes")
-    if args.chunk_size < 1:
-        raise ValueError("chunk size must be positive")
     if args.padding is not None and args.padding < 0:
         raise ValueError("padding must be non-negative")
     if args.compression is not None and args.compression < 0:
@@ -341,15 +348,19 @@ def main(argv: list[str] | None = None) -> int:
     if size == 0:
         raise ValueError("input file is empty; libcimbar cannot transmit an empty input")
     if size > MAX_ORIGINAL_BYTES:
-        raise ValueError("input is larger than the Cimbar 120-stream safety limit")
+        raise ValueError("彩码单次最多支持约 2.2 GiB；这个文件超过当前接收端上限")
+    chunk_size = select_chunk_size(size, args.chunk_size)
+    chunk_count = (size + chunk_size - 1) // chunk_size
+    if chunk_count > MAX_CHUNKS:
+        raise ValueError("当前分片设置超过接收端 120 片上限；请去掉 --chunk-size 使用自动设置")
     name = validate_name(source)
     print(f"hashing {source} ({size} bytes)…")
     digest = sha256_file(source)
     ensure_unchanged(source, before)
 
-    transfer_id = secrets.token_bytes(16) if args.new_transfer else stable_transfer_id(size, args.chunk_size, digest, name)
+    transfer_id = secrets.token_bytes(16) if args.new_transfer else stable_transfer_id(size, chunk_size, digest, name)
     output_dir = args.output.expanduser().resolve() if args.output else default_output(source, transfer_id)
-    chunks, count = build_chunks(source, output_dir, args.chunk_size, digest, name)
+    chunks, count = build_chunks(source, output_dir, chunk_size, digest, name)
     ensure_unchanged(source, before)
 
     manifest_path = output_dir / "manifest.json"
@@ -359,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
         "filename": source.name,
         "total_size": size,
         "sha256": digest,
-        "chunk_size": args.chunk_size,
+        "chunk_size": chunk_size,
         "chunk_count": count,
         "encode_id_base": ENCODE_ID_BASE,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -372,7 +383,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"transfer id: {transfer_id.hex()}")
     print(f"sha256: {digest}")
-    print(f"streams: manifest + {count} chunks × <= {args.chunk_size} bytes")
+    print(f"chunk size: {chunk_size / (1024 * 1024):g} MiB ({'automatic' if args.chunk_size is None else 'manual'})")
+    print(f"streams: manifest + {count} chunks")
     print(f"manifest: {manifest_path}")
     if args.prepare_only:
         print("prepared only; no sender window was opened")

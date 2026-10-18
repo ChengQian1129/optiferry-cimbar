@@ -26,12 +26,14 @@ public:
 
 	unsigned num_streams() const
 	{
-		return _decoder.num_streams();
+		std::lock_guard<std::mutex> lock(_readMutex);
+		return _numStreams;
 	}
 
 	unsigned num_done() const
 	{
-		return _decoder.num_done();
+		std::lock_guard<std::mutex> lock(_readMutex);
+		return _numDone;
 	}
 
 	std::vector<std::string> get_done() const
@@ -53,20 +55,21 @@ public:
 		std::lock_guard<std::mutex> lock(_readMutex);
 		_done = _decoder.get_done();
 		_progress = _decoder.get_progress();
+		_numStreams = _decoder.num_streams();
+		_numDone = _decoder.num_done();
 	}
 
 	void process()
 	{
-		if (_writeMutex.try_lock())
-		{
-			// maybe a 2nd mutex for retrieving _decoder.has_file()??
-			std::string buff;
-			while (_backlog.try_dequeue(buff))
-				_decoder << buff;
+		std::unique_lock<std::mutex> lock(_writeMutex, std::try_to_lock);
+		if (!lock.owns_lock())
+			return;
 
-			update_status();
-			_writeMutex.unlock();
-		}
+		std::string buff;
+		while (_backlog.try_dequeue(buff))
+			_decoder << buff;
+
+		update_status();
 	}
 
 	bool write(const char* data, unsigned length)
@@ -91,4 +94,6 @@ protected:
 
 	std::vector<std::string> _done;
 	std::vector<double> _progress;
+	unsigned _numStreams = 0;
+	unsigned _numDone = 0;
 };

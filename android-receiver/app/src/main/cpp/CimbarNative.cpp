@@ -5,6 +5,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include <filesystem>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -14,6 +15,7 @@
 namespace {
 
 constexpr char kTag[] = "OptiFerryCimbar";
+constexpr char kDroppedFrame[] = "__OPTIFERRY_CIMBAR_DROPPED__";
 std::mutex gMutex;
 std::shared_ptr<MultiThreadedDecoder> gDecoder;
 std::unordered_map<std::string, size_t> gReportedCounts;
@@ -61,17 +63,17 @@ Java_com_airferrylite_receiver_CimbarNative_processNv21(
         jint mode) {
     if (nv21 == nullptr || width <= 0 || height <= 0) return resultString(env, {});
 
-    const jsize length = env->GetArrayLength(nv21);
-    const int chromaHeight = (height + 1) / 2;
-    const int expected = width * height + width * chromaHeight;
-    if (length < expected) return resultString(env, {});
-
-    std::vector<jbyte> bytes(static_cast<size_t>(length));
-    env->GetByteArrayRegion(nv21, 0, length, bytes.data());
-
-    cv::Mat yuv(height + chromaHeight, width, CV_8UC1, bytes.data());
-    cv::Mat rgb;
     try {
+        const jsize length = env->GetArrayLength(nv21);
+        const int chromaHeight = (height + 1) / 2;
+        const int expected = width * height + width * chromaHeight;
+        if (length < expected) return resultString(env, {});
+
+        std::vector<jbyte> bytes(static_cast<size_t>(length));
+        env->GetByteArrayRegion(nv21, 0, length, bytes.data());
+
+        cv::Mat yuv(height + chromaHeight, width, CV_8UC1, bytes.data());
+        cv::Mat rgb;
         cv::cvtColor(yuv, rgb, cv::COLOR_YUV2RGB_NV21);
         const int code = rotateCode(rotationDegrees);
         if (code >= 0) {
@@ -79,44 +81,47 @@ Java_com_airferrylite_receiver_CimbarNative_processNv21(
             cv::rotate(rgb, rotated, code);
             rgb = rotated;
         }
-    } catch (const cv::Exception& error) {
-        __android_log_print(ANDROID_LOG_WARN, kTag, "YUV conversion failed: %s", error.what());
-        return resultString(env, {});
-    }
+        const std::string path = toString(env, dataPath);
+        if (path.empty()) return resultString(env, {});
 
-    const std::string path = toString(env, dataPath);
-    if (path.empty()) return resultString(env, {});
-
-    std::lock_guard<std::mutex> lock(gMutex);
-    std::error_code fsError;
-    std::filesystem::create_directories(path, fsError);
-    if (fsError) {
-        __android_log_print(ANDROID_LOG_WARN, kTag, "Cannot create decoder directory: %s", path.c_str());
-        return resultString(env, {});
-    }
-
-    if (!gDecoder || gPath != path || gMode != mode || !gDecoder->set_mode(mode)) {
-        stopDecoderLocked();
-        gPath = path;
-        gMode = mode;
-        gDecoder = std::make_shared<MultiThreadedDecoder>(path, mode);
-    }
-
-    gDecoder->add(rgb);
-
-    // Decoder workers finish asynchronously. Returning every newly stored file
-    // on the next camera frame keeps the camera thread non-blocking while still
-    // delivering all manifest/part completions exactly once.
-    std::unordered_map<std::string, size_t> available;
-    for (const std::string& filename : gDecoder->get_done()) {
-        ++available[filename];
-    }
-    for (const auto& [filename, total] : available) {
-        size_t& reported = gReportedCounts[filename];
-        if (reported < total) {
-            ++reported;
-            return resultString(env, path + "/" + filename);
+        std::lock_guard<std::mutex> lock(gMutex);
+        std::error_code fsError;
+        std::filesystem::create_directories(path, fsError);
+        if (fsError) {
+            __android_log_print(ANDROID_LOG_WARN, kTag, "Cannot create decoder directory: %s", path.c_str());
+            return resultString(env, {});
         }
+
+        if (!gDecoder || gPath != path || gMode != mode || !gDecoder->set_mode(mode)) {
+            stopDecoderLocked();
+            gPath = path;
+            gMode = mode;
+            gDecoder = std::make_shared<MultiThreadedDecoder>(path, mode);
+        }
+
+        const bool accepted = gDecoder->add(rgb);
+
+        // Decoder workers finish asynchronously. Returning every newly stored file
+        // on the next camera frame keeps the camera thread non-blocking while still
+        // delivering all manifest/part completions exactly once.
+        std::unordered_map<std::string, size_t> available;
+        for (const std::string& filename : gDecoder->get_done()) {
+            ++available[filename];
+        }
+        for (const auto& [filename, total] : available) {
+            size_t& reported = gReportedCounts[filename];
+            if (reported < total) {
+                ++reported;
+                return resultString(env, path + "/" + filename);
+            }
+        }
+        return resultString(env, accepted ? "" : kDroppedFrame);
+    } catch (const cv::Exception& error) {
+        __android_log_print(ANDROID_LOG_WARN, kTag, "Cimbar frame failed: %s", error.what());
+    } catch (const std::exception& error) {
+        __android_log_print(ANDROID_LOG_WARN, kTag, "Cimbar native exception: %s", error.what());
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_WARN, kTag, "Cimbar native exception");
     }
     return resultString(env, {});
 }

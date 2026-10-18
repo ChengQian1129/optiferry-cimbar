@@ -158,6 +158,46 @@ TEST_CASE( "FountainSinkTest/testDistinctStreamsDoNotShareLowBitsSlot", "[unit]"
 	assertEquals(2u, sink.num_streams());
 }
 
+TEST_CASE( "FountainSinkTest/testFullSinkPreservesProgressAndAdmitsWaitingStream", "[unit]" )
+{
+	MakeTempDirectory tempdir;
+	fountain_decoder_sink sink(625, write_on_store<std::ofstream>(tempdir.path().string()));
+	std::string content = dummyContents(2000).str();
+	std::array<char, 625> frame;
+
+	for (uint8_t id = 0; id < 8; ++id)
+	{
+		stringstream input(content);
+		auto encoder = fountain_encoder_stream::create(input, 625, id);
+		assertEquals(625u, encoder->readsome(frame.data(), frame.size()));
+		assertEquals(0, sink.decode_frame(frame.data(), frame.size()));
+	}
+	assertEquals(8u, sink.num_streams());
+
+	stringstream waitingInput(content);
+	auto waitingEncoder = fountain_encoder_stream::create(waitingInput, 625, 8);
+	assertEquals(625u, waitingEncoder->readsome(frame.data(), frame.size()));
+	assertEquals(-13, sink.decode_frame(frame.data(), frame.size()));
+	assertEquals(8u, sink.num_streams());
+
+	stringstream continuationInput(content);
+	auto continuation = fountain_encoder_stream::create(continuationInput, 625, 0, 1);
+	for (unsigned i = 0; i < continuation->blocks_required() && !sink.is_done(FountainMetadata(0, content.size(), 0).id()); ++i)
+	{
+		assertEquals(625u, continuation->readsome(frame.data(), frame.size()));
+		sink.decode_frame(frame.data(), frame.size());
+	}
+	assertEquals(true, sink.is_done(FountainMetadata(0, content.size(), 0).id()));
+	assertEquals(7u, sink.num_streams());
+
+	waitingInput.clear();
+	waitingInput.seekg(0);
+	waitingEncoder = fountain_encoder_stream::create(waitingInput, 625, 8);
+	assertEquals(625u, waitingEncoder->readsome(frame.data(), frame.size()));
+	assertEquals(0, sink.decode_frame(frame.data(), frame.size()));
+	assertEquals(8u, sink.num_streams());
+}
+
 TEST_CASE( "FountainSinkTest/testRejection", "[unit]" )
 {
 	MakeTempDirectory tempdir;

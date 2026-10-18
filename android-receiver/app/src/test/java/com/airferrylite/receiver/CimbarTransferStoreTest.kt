@@ -32,7 +32,8 @@ class CimbarTransferStoreTest {
             if (complete == null) throw AssertionError("assembly error: ${store.error()}")
 
             assertNotNull(complete)
-            assertArrayEquals(first + second, complete!!.bytes)
+            assertArrayEquals(first + second, complete!!.file.readBytes())
+            assertTrue(complete.file.name.startsWith(".complete-"))
             assertEquals("archive.zip", complete.name)
             assertEquals(CimbarTransferProgress("archive.zip", 2, 2, 8), store.progress())
         } finally {
@@ -60,7 +61,7 @@ class CimbarTransferStoreTest {
             part.writeBytes(newBytes)
             val complete = store.acceptCompletedFile(part.path)
             assertNotNull(complete)
-            assertArrayEquals(newBytes, complete!!.bytes)
+            assertArrayEquals(newBytes, complete!!.file.readBytes())
             assertNull(store.error())
         } finally {
             root.deleteRecursively()
@@ -80,7 +81,7 @@ class CimbarTransferStoreTest {
 
             val firstResult = store.acceptCompletedFile(manifest.path)
             assertNotNull(firstResult)
-            assertArrayEquals(first + second, firstResult!!.bytes)
+            assertArrayEquals(first + second, firstResult!!.file.readBytes())
             assertTrue(store.consumeManifestResetRequest())
             assertTrue(!store.consumeManifestResetRequest())
             assertEquals(CimbarTransferProgress("archive.zip", 2, 2, 8), store.progress())
@@ -110,8 +111,21 @@ class CimbarTransferStoreTest {
             part.writeBytes(expected.copyOf(2))
             val complete = store.acceptCompletedFile(part.path)
             assertNotNull(complete)
-            assertArrayEquals(expected, complete!!.bytes)
+            assertArrayEquals(expected, complete!!.file.readBytes())
             assertNull(store.error())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun manifestNameCannotBeUsedForOutputFile() {
+        val root = Files.createTempDirectory("cimbar-store").toFile()
+        try {
+            val manifest = writeManifest(root, "Manifest.JSON", "payload".toByteArray())
+            val store = CimbarTransferStore(root)
+            assertNull(store.acceptCompletedFile(manifest.path))
+            assertTrue(store.error()?.contains("控制文件名") == true)
         } finally {
             root.deleteRecursively()
         }

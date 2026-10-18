@@ -8,6 +8,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 data class CimbarTransferProgress(
     val filename: String?,
@@ -18,7 +20,7 @@ data class CimbarTransferProgress(
 
 data class CimbarCompletedFile(
     val name: String,
-    val bytes: ByteArray,
+    val file: File,
     val sha256: String
 )
 
@@ -131,6 +133,8 @@ class CimbarTransferStore(private val root: File) {
 
     private fun reloadExisting() {
         partFiles.clear()
+        root.listFiles()?.filter { it.name.startsWith(".assembled-") && it.name.endsWith(".tmp") }
+            ?.forEach { it.delete() }
         val manifestFile = File(root, MANIFEST_NAME)
         if (manifestFile.isFile) {
             runCatching { manifest = parseManifest(manifestFile.readText(Charsets.UTF_8)) }
@@ -154,6 +158,9 @@ class CimbarTransferStore(private val root: File) {
             .substringAfterLast('\\')
         require(originalFilename.isNotBlank() && originalFilename.toByteArray(Charsets.UTF_8).size <= MAX_NAME_BYTES) {
             "manifest 文件名非法"
+        }
+        require(!originalFilename.equals(MANIFEST_NAME, ignoreCase = true)) {
+            "manifest.json 是彩码控制文件名，不能作为输出文件名"
         }
         val totalSize = json.requiredLong("total_size")
         val chunkCount = json.requiredInt("chunk_count")
@@ -196,7 +203,10 @@ class CimbarTransferStore(private val root: File) {
         if (deliveredIdentity == current.identity) return null
         if (current.parts.any { partFiles[it.filename]?.isFile != true }) return null
 
-        val temporary = File(root, ".assembled-${current.identity.hashCode().toUInt().toString(16)}.tmp")
+        val identityKey = MessageDigest.getInstance("SHA-256")
+            .digest(current.identity.toByteArray(Charsets.UTF_8)).toHex()
+        val temporary = File.createTempFile(".assembled-", ".tmp", root)
+        val completed = File(root, ".complete-$identityKey.bin")
         try {
             val fullDigest = MessageDigest.getInstance("SHA-256")
             BufferedOutputStream(FileOutputStream(temporary)).use { output ->
@@ -226,10 +236,9 @@ class CimbarTransferStore(private val root: File) {
             require(temporary.length() == current.totalSize) { "拼接后大小不匹配" }
             val digest = fullDigest.digest().toHex()
             require(digest == current.sha256) { "完整文件 SHA-256 校验失败" }
-            require(current.totalSize <= Int.MAX_VALUE.toLong()) { "彩码文件超过 Android 内存限制" }
-            val bytes = temporary.readBytes()
+            Files.move(temporary.toPath(), completed.toPath(), StandardCopyOption.REPLACE_EXISTING)
             deliveredIdentity = current.identity
-            return CimbarCompletedFile(current.filename, bytes, digest)
+            return CimbarCompletedFile(current.filename, completed, digest)
         } finally {
             temporary.delete()
         }

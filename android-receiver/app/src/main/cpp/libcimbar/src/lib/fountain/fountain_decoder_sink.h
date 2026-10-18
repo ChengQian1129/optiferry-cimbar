@@ -9,7 +9,6 @@
 #include "util/File.h"
 
 #include <cstdio>
-#include <deque>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -44,6 +43,9 @@ std::function<std::string(const std::string&, const std::vector<uint8_t>&)> deco
 		std::string file_path = fmt::format("{}/{}", data_dir, filename);
 		cimbar::zstd_decompressor<OUTSTREAM> f(file_path, std::ios::binary);
 		f.write((char*)data.data(), data.size());
+		f.flush();
+		if (!f.good() || !f.finish())
+			return std::string{};
 		if (log_writes)
 			printf("%s\n", file_path.c_str());
 		return filename;
@@ -77,15 +79,23 @@ public:
 
 	bool store(const FountainMetadata& md, fountain_decoder_stream& s)
 	{
-		if (_onStore)
+		if (!_onStore)
+			return true;
+		try
 		{
 			auto res = s.recover();
 			if (!res)
 				return false;
 			std::string filename = _onStore(get_filename(md), *res);
+			if (filename.empty())
+				return false;
 			mark_done(md, filename);
+			return true;
 		}
-		return true;
+		catch (...)
+		{
+			return false;
+		}
 	}
 
 	void mark_done(const FountainMetadata& md, const std::string& filename)
@@ -93,8 +103,10 @@ public:
 		_done[md.id()] = filename;
 		auto it = _streams.find(md.id());
 		if (it != _streams.end())
+		{
+			_activeStreamBytes -= it->second.data_size();
 			_streams.erase(it);
-		forget_stream(md.id());
+		}
 	}
 
 	unsigned num_streams() const
@@ -150,11 +162,9 @@ public:
 		if (is_done(md.id()))
 			return -1;
 
-		// Find or create the decoder for this complete stream identity.  The
-		// upstream implementation used only the lower three encode-id bits as a
-		// slot, so the ninth input could collide with an incomplete first input.
-		// Keep the memory bound, but use the full metadata id and evict the oldest
-		// incomplete stream when a new one arrives.
+		// Preserve the full stream identity. When memory is full, defer new
+		// streams instead of evicting partial decoders: repeated fountain blocks
+		// can then finish existing streams before a waiting stream is admitted.
 		const uint32_t streamId = md.id();
 		for (const auto& [id, stream] : _streams)
 		{
@@ -163,14 +173,16 @@ public:
 		}
 		if (_streams.find(streamId) == _streams.end())
 		{
-			while (_streams.size() >= max_active_streams())
-				evict_oldest();
+			if (_streams.size() >= max_active_streams() ||
+				md.file_size() > max_active_stream_bytes() - _activeStreamBytes)
+				return -13;
 		}
 		auto p = _streams.try_emplace(streamId, md.file_size(), _chunkSize);
 		fountain_decoder_stream& s = p.first->second;
+		if (p.second)
+			_activeStreamBytes += md.file_size();
 		if (s.data_size() != md.file_size())
 			return -12;
-		touch_stream(streamId);
 
 		bool finished = s.write(data, size);
 		if (!finished)
@@ -180,7 +192,16 @@ public:
 		// store() will call mark_done() afterwards
 		// -- and the assembled file will be dropped from RAM.
 		// but if no callback is provided, you can do something else.
-		store(md, s);
+		if (!store(md, s))
+		{
+			auto failed = _streams.find(streamId);
+			if (failed != _streams.end())
+			{
+				_activeStreamBytes -= failed->second.data_size();
+				_streams.erase(failed);
+			}
+			return -14;
+		}
 		return (int64_t)0 + md.id();
 	}
 
@@ -208,8 +229,10 @@ public:
 
 		fountain_decoder_stream& s = p->second;
 		bool res = s.recover(data, size);
+		if (!res)
+			return false;
 		mark_done(md, get_filename(md));
-		return res;
+		return true;
 	}
 
 protected:
@@ -218,48 +241,17 @@ protected:
 		return 8;
 	}
 
-	void forget_stream(uint32_t streamId)
+	static constexpr size_t max_active_stream_bytes()
 	{
-		for (auto it = _streamOrder.begin(); it != _streamOrder.end(); ++it)
-		{
-			if (*it == streamId)
-			{
-				_streamOrder.erase(it);
-				return;
-			}
-		}
-	}
-
-	void touch_stream(uint32_t streamId)
-	{
-		forget_stream(streamId);
-		_streamOrder.push_back(streamId);
-	}
-
-	void evict_oldest()
-	{
-		while (!_streamOrder.empty())
-		{
-			const uint32_t streamId = _streamOrder.front();
-			_streamOrder.pop_front();
-			if (_streams.erase(streamId) > 0)
-				return;
-		}
-		// This should be unreachable, but guarantees progress if a future change
-		// leaves the order list out of sync with the decoder map.
-		if (!_streams.empty())
-			_streams.erase(_streams.begin());
+		return 64u * 1024u * 1024u;
 	}
 
 protected:
 	unsigned _chunkSize;
 	std::function<std::string(const std::string&, const std::vector<uint8_t>&)> _onStore;
 
-	// maybe instead of unordered_map+set, something where we can "age out" old streams?
-	// e.g. most recent 16/8, or something?
-	// question is what happens to _done/_streams when we wrap for continuous data streaming...
 	std::unordered_map<uint32_t, fountain_decoder_stream> _streams;
-	std::deque<uint32_t> _streamOrder;
+	size_t _activeStreamBytes = 0;
 	// track the uint32_t combo of (encode_id,size) to avoid redundant work
 	std::unordered_map<uint32_t, std::string> _done;
 	bool _logWrites;

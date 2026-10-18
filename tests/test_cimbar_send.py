@@ -170,6 +170,20 @@ class CimbarSendTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "empty"):
                 cimbar_send.main([str(source), "--prepare-only"])
 
+    def test_manifest_filename_is_reserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "Manifest.JSON"
+            source.write_bytes(b"payload")
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                cimbar_send.main([str(source), "--prepare-only"])
+
+    def test_receiver_rejects_modes_not_supported_by_apk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "sample.bin"
+            source.write_bytes(b"payload")
+            with self.assertRaisesRegex(ValueError, "固定使用 Mode B"):
+                cimbar_send.main([str(source), "--mode", "4C"])
+
 
 if __name__ == "__main__":
     unittest.main()

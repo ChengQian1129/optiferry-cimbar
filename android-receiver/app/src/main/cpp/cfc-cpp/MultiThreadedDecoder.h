@@ -32,6 +32,12 @@ atomic_decompress_on_store(const std::string& data_path)
 			filename = File::basename(filename);
 		if (filename.empty())
 			filename = fallback_name;
+		if (filename.empty() || filename == "." || filename == ".." ||
+			filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos)
+			return std::string{};
+		for (unsigned char character : filename)
+			if (character < 0x20 || character == 0x7f)
+				return std::string{};
 
 		const std::filesystem::path final_path = std::filesystem::path(data_path) / filename;
 		const auto sequence = gAtomicStoreSequence.fetch_add(1, std::memory_order_relaxed);
@@ -40,6 +46,13 @@ atomic_decompress_on_store(const std::string& data_path)
 		{
 			cimbar::zstd_decompressor<std::ofstream> output(temporary_path.string(), std::ios::binary);
 			output.write(reinterpret_cast<const char*>(data.data()), data.size());
+			output.flush();
+			if (!output.good() || !output.finish())
+			{
+				std::error_code ignored;
+				std::filesystem::remove(temporary_path, ignored);
+				return std::string{};
+			}
 		}
 
 		std::error_code rename_error;
@@ -49,13 +62,12 @@ atomic_decompress_on_store(const std::string& data_path)
 			// Android uses POSIX rename semantics. Keep a conservative fallback
 			// for unusual providers/filesystems so a transient rename failure does
 			// not silently mark a decoded stream as complete with no output.
-			std::ifstream input(temporary_path, std::ios::binary);
-			std::ofstream output(final_path, std::ios::binary | std::ios::trunc);
-			output << input.rdbuf();
-			output.flush();
+			std::error_code copy_error;
+			std::filesystem::copy_file(temporary_path, final_path,
+				std::filesystem::copy_options::overwrite_existing, copy_error);
 			std::error_code ignored;
 			std::filesystem::remove(temporary_path, ignored);
-			if (!output.good())
+			if (copy_error)
 				return std::string{};
 		}
 		return filename;
@@ -69,14 +81,14 @@ class MultiThreadedDecoder
 public:
 	MultiThreadedDecoder(std::string data_path, int mode_val);
 
-	inline static clock_t count = 0;
-	inline static clock_t bytes = 0;
-	inline static clock_t perfect = 0;
-	inline static clock_t decoded = 0;
-	inline static clock_t decodeTicks = 0;
-	inline static clock_t scanned = 0;
-	inline static clock_t scanTicks = 0;
-	inline static clock_t extractTicks = 0;
+	inline static std::atomic<clock_t> count{0};
+	inline static std::atomic<clock_t> bytes{0};
+	inline static std::atomic<clock_t> perfect{0};
+	inline static std::atomic<clock_t> decoded{0};
+	inline static std::atomic<clock_t> decodeTicks{0};
+	inline static std::atomic<clock_t> scanned{0};
+	inline static std::atomic<clock_t> scanTicks{0};
+	inline static std::atomic<clock_t> extractTicks{0};
 
 	bool add(cv::Mat mat);
 
@@ -100,8 +112,8 @@ protected:
 	static unsigned fountain_chunk_size(int mode_val);
 
 protected:
-	int _modeVal;
-	int _detectedMode;
+	std::atomic<int> _modeVal;
+	std::atomic<int> _detectedMode;
 
 	Decoder _dec;
 	unsigned _numThreads;
@@ -109,6 +121,7 @@ protected:
 	concurrent_fountain_decoder_sink _writer;
 	std::string _dataPath;
 	unsigned _successCondition;
+	std::atomic<unsigned> _submittedFrames{0};
 };
 
 inline MultiThreadedDecoder::MultiThreadedDecoder(std::string data_path, int mode_val)
@@ -160,7 +173,7 @@ inline bool MultiThreadedDecoder::add(cv::Mat mat)
     unsigned modeVal = _modeVal;
     if (modeVal == 0)
     {
-        switch (count%4) {
+        switch (_submittedFrames.fetch_add(1, std::memory_order_relaxed)%4) {
             case 1:
                 modeVal = 4;
                 break;
@@ -174,27 +187,35 @@ inline bool MultiThreadedDecoder::add(cv::Mat mat)
                 modeVal = 68;
         }
     }
-    return _pool.try_execute( [&, mat, modeVal] () {
-		cimbar::Config::update(modeVal);
-		cv::Mat img;
-		int res = do_extract(mat, img);
-		if (res == Extractor::FAILURE)
-			return;
+	return _pool.try_execute( [this, mat, modeVal] () {
+		try
+		{
+			cimbar::Config::update(modeVal);
+			cv::Mat img;
+			int res = do_extract(mat, img);
+			if (res == Extractor::FAILURE)
+				return;
 
-		// if extracted image is small, we'll need to run some filters on it
-		clock_t begin = clock();
-		bool should_preprocess = (res == Extractor::NEEDS_SHARPEN);
-		int color_correction = modeVal==4? 1 : 2;
-		unsigned decodeRes = _dec.decode_fountain(img, _writer, should_preprocess, color_correction);
-		bytes += decodeRes;
-		++decoded;
-		decodeTicks += clock() - begin;
+			// if extracted image is small, we'll need to run some filters on it
+			clock_t begin = clock();
+			bool should_preprocess = (res == Extractor::NEEDS_SHARPEN);
+			int color_correction = modeVal==4? 1 : 2;
+			unsigned decodeRes = _dec.decode_fountain(img, _writer, should_preprocess, color_correction);
+			bytes += decodeRes;
+			++decoded;
+			decodeTicks += clock() - begin;
 
-		if (decodeRes and _modeVal == 0)
-			_detectedMode = modeVal;
+			if (decodeRes and _modeVal == 0)
+				_detectedMode = modeVal;
 
-		if (decodeRes >= _successCondition)
-			++perfect;
+			if (decodeRes >= _successCondition)
+				++perfect;
+		}
+		catch (...)
+		{
+			// A malformed camera frame must be dropped without terminating the
+			// thread pool or the Android process.
+		}
 	} );
 }
 

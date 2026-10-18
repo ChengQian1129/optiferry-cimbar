@@ -6,6 +6,7 @@
 #include "encoder/Encoder.h"
 #include "gui/window_glfw.h"
 #include "util/byte_istream.h"
+#include <array>
 #include <sstream>
 
 namespace {
@@ -20,6 +21,8 @@ namespace {
 	// start encode_id is 109. This is mostly unimportant (it only needs to wrap between [0,127]), but useful
 	// for the decoder -- because it gives it a better distribution of colors in the first frame header it sees.
 	uint8_t _encodeId = 109;
+	std::array<unsigned, 128> _nextBlockByEncodeId{};
+	unsigned _streamStartBlock = 0;
 
 	// settings, will be overriden by first call to configure()
 	int _modeVal = 68;
@@ -116,9 +119,11 @@ int cimbare_next_frame(bool color_balance)
 	// *too* low (1-2), or we risk long runs of blocks the decoder
 	// has already seen.
 	unsigned required = _fes->blocks_required() * 8;
-	if (_fes->block_count() > required)
+	if (_fes->block_count() - _streamStartBlock > required)
 	{
 		_fes->restart();
+		_streamStartBlock = 0;
+		_nextBlockByEncodeId[_encodeId] = 0;
 		if (_window)
 			_window->shake(0);
 		_frameCount = 0;
@@ -129,7 +134,23 @@ int cimbare_next_frame(bool color_balance)
 		enc.set_color_mode(cimbar::Config::color_mode() + 0x100);
 	enc.set_encode_id(_encodeId);
 	_next = enc.encode_next(*_fes, _window? cimbar::vec_xy{_window->width(), _window->height()} : cimbar::vec_xy{});
+	_nextBlockByEncodeId[_encodeId] = _fes->block_count();
 	return ++_frameCount;
+}
+
+unsigned cimbare_blocks_required()
+{
+	return _fes ? _fes->blocks_required() : 0;
+}
+
+unsigned cimbare_chunks_per_frame()
+{
+	return cimbar::Config::fountain_chunks_per_frame();
+}
+
+unsigned cimbare_next_block_id()
+{
+	return _nextBlockByEncodeId[_encodeId];
 }
 
 // maybe init_encode w/ filename,size,encode_id,
@@ -146,9 +167,12 @@ int cimbare_init_encode(const char* filename, unsigned fnsize, int encode_id)
 	}
 
 	if (encode_id < 0)
-		++_encodeId; // increment _encodeId every time we change files
+	{
+		_encodeId = static_cast<uint8_t>((_encodeId + 1u) & 0x7fu); // increment and wrap the 7-bit stream ID
+		_nextBlockByEncodeId[_encodeId] = 0;
+	}
 	else
-		_encodeId = encode_id;
+		_encodeId = static_cast<uint8_t>(encode_id & 0x7f);
 
 	_comp = std::make_unique<cimbar::zstd_compressor<std::stringstream>>();
 	if (!_comp)
@@ -188,7 +212,8 @@ int cimbare_encode(const unsigned char* buffer, unsigned size)
 		_comp->pad(fountainChunkSize - compressedSize + 1);
 
 	// create the encoder stream
-	_fes = fountain_encoder_stream::create(*_comp, fountainChunkSize, _encodeId);
+	_streamStartBlock = _nextBlockByEncodeId[_encodeId];
+	_fes = fountain_encoder_stream::create(*_comp, fountainChunkSize, _encodeId, _streamStartBlock);
 	_comp.reset();
 	if (!_fes)
 		return -3;

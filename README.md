@@ -31,7 +31,7 @@ qsend /path/to/file
 bash scripts/install-cimbar-wsl.sh
 ```
 
-此前安装过旧版本的 WSL 环境也要重新运行一次。多分片轮播修复在原生 `cimbar_send` 中；安装脚本会构建新版、记录二进制哈希并放到受管路径。多分片发送会验证该记录，缺失或不匹配时停止并提示重装，避免退回旧发送器。
+此前安装过旧版本的 WSL 环境也要重新运行一次。多分片轮播修复在原生 `cimbar_send` 中：同一分片在重复轮播时沿用 stream ID 和 fountain block 编号，接收端才能跨轮累积有效块。安装脚本会构建新版、记录二进制哈希并放到受管路径；发送时发现 16 位 block 编号空间耗尽会明确停止并提示重新开始传输。
 
 以后发送安全上限内的文件只需要：
 
@@ -41,9 +41,9 @@ cimbar-send /mnt/f/wang_ct/CT_DICOM_complete.zip
 
 这个命令会自动计算哈希、按默认 10 MiB 生成彩码分片和 manifest，并调用原生 `cimbar_send` 循环播放。手机会校验每个分片和完整文件 SHA-256，完成后显示保存按钮。
 
-默认是 Mode B / 15 fps；需要实测时可以覆盖：`cimbar-send FILE --fps 20`、`--mode 4C` 或 `--chunk-size 16MiB`。分片和 manifest 默认保存在 WSL 原生文件系统的 `~/.cache/optiferry-cimbar/transfers/`。详细格式见 [protocol/OPM1.md](protocol/OPM1.md)。
+默认是 Mode B / 15 fps；需要实测时可以覆盖：`cimbar-send FILE --fps 20` 或 `--chunk-size 16MiB`。APK 诊断区会显示接收端实际接纳的帧率和被 native 队列丢弃的帧数；如果丢帧持续增长，应降低发送 FPS。接收端最多同时保留 8 条流且活动输入总量不超过 64 MiB，超额的新流会等待空位，不会淘汰已有分片进度。拼接和保存使用文件流，不把完整大文件读入 Java 堆。当前 OptiFerry APK 固定接收 Mode B，`Bm`、`Bu`、`4C` 仅可用于 `--prepare-only`，不能直接播放给这个 APK。分片和 manifest 默认保存在 WSL 原生文件系统的 `~/.cache/optiferry-cimbar/transfers/`。详细格式见 [protocol/OPM1.md](protocol/OPM1.md)。
 
-不要用普通 `split` 手动切分；裸分片没有 manifest，手机无法知道顺序、大小和完整文件哈希。空文件暂不支持发送。
+不要用普通 `split` 手动切分；裸分片没有 manifest，手机无法知道顺序、大小和完整文件哈希。输入文件名不能是 `manifest.json`，因为这个名字保留给接收端的控制 manifest。空文件暂不支持发送。
 
 ## 已交付
 

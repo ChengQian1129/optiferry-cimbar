@@ -58,15 +58,17 @@ else
     git -C "$source_dir" apply "$patch"
 fi
 
-if grep -qF 'cimbare_chunks_per_frame' "$source_dir/src/lib/cimbar_js/cimbar_js.h" && \
-    grep -qF 'blocksPerFrame' "$source_dir/src/exe/cimbar_send/send.cpp" && \
-    grep -qF 'requiredBlocks + blocksPerFrame' "$source_dir/src/exe/cimbar_send/send.cpp"; then
+if grep -qF 'cimbare_next_block_id' "$source_dir/src/lib/cimbar_js/cimbar_js.h" && \
+    grep -qF 'wrap the 7-bit stream ID' "$source_dir/src/lib/cimbar_js/cimbar_js.cpp" && \
+    grep -qF 'requestedFrameLimit' "$source_dir/src/exe/cimbar_send/send.cpp" && \
+    grep -qF 'blocksPerFrame == 0' "$source_dir/src/exe/cimbar_send/send.cpp" && \
+    grep -qF 'nextBlockId' "$source_dir/src/exe/cimbar_send/send.cpp" && \
+    grep -qF 'const int encodeId = infiles.size() > 1' "$source_dir/src/exe/cimbar_send/send.cpp"; then
     echo 'Multi-input stream cadence patch already present.'
 else
     # Older working trees used blocks_required() as a frame count. Remove only
     # those three managed files before applying the corrected frame-budget patch.
-    if grep -qF 'cimbare_blocks_required' "$source_dir/src/lib/cimbar_js/cimbar_js.h" && \
-        grep -qF 'framesRendered >= frameLimit' "$source_dir/src/exe/cimbar_send/send.cpp"; then
+    if grep -qF 'cimbare_blocks_required' "$source_dir/src/lib/cimbar_js/cimbar_js.h"; then
         git -C "$source_dir" checkout -- \
             src/lib/cimbar_js/cimbar_js.h \
             src/lib/cimbar_js/cimbar_js.cpp \

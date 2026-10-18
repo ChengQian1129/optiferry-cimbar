@@ -1,41 +1,65 @@
-diff --git a/src/lib/cimbar_js/cimbar_js.h b/src/lib/cimbar_js/cimbar_js.h
---- a/src/lib/cimbar_js/cimbar_js.h
-+++ b/src/lib/cimbar_js/cimbar_js.h
-@@ -11,5 +11,7 @@
- int cimbare_render();
- int cimbare_next_frame(bool color_balance=false);
-+unsigned cimbare_blocks_required();
-+unsigned cimbare_chunks_per_frame();
- int cimbare_init_encode(const char* filename, unsigned fnsize, int encode_id);
- int cimbare_encode_bufsize();
- int cimbare_encode(const unsigned char* buffer, unsigned size);
-diff --git a/src/lib/cimbar_js/cimbar_js.cpp b/src/lib/cimbar_js/cimbar_js.cpp
---- a/src/lib/cimbar_js/cimbar_js.cpp
-+++ b/src/lib/cimbar_js/cimbar_js.cpp
-@@ -139,1 +139,11 @@
-+unsigned cimbare_blocks_required()
-+{
-+	return _fes ? _fes->blocks_required() : 0;
-+}
-+
-+unsigned cimbare_chunks_per_frame()
-+{
-+	return cimbar::Config::fountain_chunks_per_frame();
-+}
-+
- int cimbare_init_encode(const char* filename, unsigned fnsize, int encode_id)
 diff --git a/src/exe/cimbar_send/send.cpp b/src/exe/cimbar_send/send.cpp
+index e02a107..3a1b53a 100644
 --- a/src/exe/cimbar_send/send.cpp
 +++ b/src/exe/cimbar_send/send.cpp
-@@ -133,11 +133,23 @@ int main(int argc, char** argv)
+@@ -10,6 +10,7 @@
+ 
+ #include <chrono>
+ #include <iostream>
++#include <algorithm>
+ #include <string>
+ #include <thread>
+ #include <vector>
+@@ -58,6 +59,11 @@ int main(int argc, char** argv)
+ 
+ 	vector<string> infiles = result["in"].as<vector<string>>();
+ 	compressionLevel = result["compression"].as<int>();
++	if (infiles.size() > 128)
++	{
++		std::cerr << "Cimbar supports at most 128 distinct input streams." << std::endl;
++		return 64;
++	}
+ 
+ 	unsigned config_mode = 68;
+ 	if (result.count("mode"))
+@@ -111,7 +117,8 @@ int main(int argc, char** argv)
+ 					continue;
+ 				}
+ 
+-				if (cimbare_init_encode(filename.data(), filename.size(), -1) < 0)
++				const int encodeId = infiles.size() > 1 ? static_cast<int>((110u + i) % 128u) : -1;
++				if (cimbare_init_encode(filename.data(), filename.size(), encodeId) < 0)
+ 				{
+ 					std::cerr << "failed to 'init encode' file " << filename << std::endl;
+ 					continue; // abort??
+@@ -132,12 +139,42 @@ int main(int argc, char** argv)
+ 
  			// after loading our current file, render frames to the screen until next_frame() loops
  			int frameCount = 0;
 +			unsigned framesRendered = 0;
 +			const unsigned blocksPerFrame = cimbare_chunks_per_frame();
 +			const unsigned requiredBlocks = cimbare_blocks_required();
-+			const unsigned frameLimit = infiles.size() > 1
++			if (blocksPerFrame == 0)
++			{
++				std::cerr << "invalid Cimbar frame capacity." << std::endl;
++				return 74;
++			}
++			const unsigned requestedFrameLimit = infiles.size() > 1
 +				? (2u * requiredBlocks + blocksPerFrame - 1) / blocksPerFrame
 +				: 0u;
++			const unsigned nextBlockId = cimbare_next_block_id();
++			if (requestedFrameLimit > 0 && nextBlockId >= 0x10000u)
++			{
++				std::cerr << "fountain block-id space exhausted for this input; start a new transfer." << std::endl;
++				return 74;
++			}
++			const unsigned remainingFrames = (0x10000u - nextBlockId) / blocksPerFrame;
++			const unsigned frameLimit = requestedFrameLimit == 0 ? 0 : std::min(requestedFrameLimit, remainingFrames);
++			if (requestedFrameLimit > 0 && frameLimit == 0)
++			{
++				std::cerr << "fountain block-id space exhausted for this input; start a new transfer." << std::endl;
++				return 74;
++			}
 +			int nextFrame = 0;
  			do {
  				start = wait_for_frame_time(delay, start);
@@ -52,4 +76,135 @@ diff --git a/src/exe/cimbar_send/send.cpp b/src/exe/cimbar_send/send.cpp
  		}
  
  	return 0; // should never reach here
+diff --git a/src/lib/cimbar_js/cimbar_js.cpp b/src/lib/cimbar_js/cimbar_js.cpp
+index aba51e8..fc4bb34 100644
+--- a/src/lib/cimbar_js/cimbar_js.cpp
++++ b/src/lib/cimbar_js/cimbar_js.cpp
+@@ -6,6 +6,7 @@
+ #include "encoder/Encoder.h"
+ #include "gui/window_glfw.h"
+ #include "util/byte_istream.h"
++#include <array>
+ #include <sstream>
+ 
+ namespace {
+@@ -20,6 +21,8 @@ namespace {
+ 	// start encode_id is 109. This is mostly unimportant (it only needs to wrap between [0,127]), but useful
+ 	// for the decoder -- because it gives it a better distribution of colors in the first frame header it sees.
+ 	uint8_t _encodeId = 109;
++	std::array<unsigned, 128> _nextBlockByEncodeId{};
++	unsigned _streamStartBlock = 0;
+ 
+ 	// settings, will be overriden by first call to configure()
+ 	int _modeVal = 68;
+@@ -116,9 +119,11 @@ int cimbare_next_frame(bool color_balance)
+ 	// *too* low (1-2), or we risk long runs of blocks the decoder
+ 	// has already seen.
+ 	unsigned required = _fes->blocks_required() * 8;
+-	if (_fes->block_count() > required)
++	if (_fes->block_count() - _streamStartBlock > required)
+ 	{
+ 		_fes->restart();
++		_streamStartBlock = 0;
++		_nextBlockByEncodeId[_encodeId] = 0;
+ 		if (_window)
+ 			_window->shake(0);
+ 		_frameCount = 0;
+@@ -129,9 +134,25 @@ int cimbare_next_frame(bool color_balance)
+ 		enc.set_color_mode(cimbar::Config::color_mode() + 0x100);
+ 	enc.set_encode_id(_encodeId);
+ 	_next = enc.encode_next(*_fes, _window? cimbar::vec_xy{_window->width(), _window->height()} : cimbar::vec_xy{});
++	_nextBlockByEncodeId[_encodeId] = _fes->block_count();
+ 	return ++_frameCount;
  }
+ 
++unsigned cimbare_blocks_required()
++{
++	return _fes ? _fes->blocks_required() : 0;
++}
++
++unsigned cimbare_chunks_per_frame()
++{
++	return cimbar::Config::fountain_chunks_per_frame();
++}
++
++unsigned cimbare_next_block_id()
++{
++	return _nextBlockByEncodeId[_encodeId];
++}
++
+ // maybe init_encode w/ filename,size,encode_id,
+ // then encode() with buff,size? ... when size < chunksize (or size ==0), we're done
+ // return 0 on done, 1 iff work to continue?
+@@ -146,9 +167,12 @@ int cimbare_init_encode(const char* filename, unsigned fnsize, int encode_id)
+ 	}
+ 
+ 	if (encode_id < 0)
+-		++_encodeId; // increment _encodeId every time we change files
++	{
++		_encodeId = static_cast<uint8_t>((_encodeId + 1u) & 0x7fu); // increment and wrap the 7-bit stream ID
++		_nextBlockByEncodeId[_encodeId] = 0;
++	}
+ 	else
+-		_encodeId = encode_id;
++		_encodeId = static_cast<uint8_t>(encode_id & 0x7f);
+ 
+ 	_comp = std::make_unique<cimbar::zstd_compressor<std::stringstream>>();
+ 	if (!_comp)
+@@ -188,7 +212,8 @@ int cimbare_encode(const unsigned char* buffer, unsigned size)
+ 		_comp->pad(fountainChunkSize - compressedSize + 1);
+ 
+ 	// create the encoder stream
+-	_fes = fountain_encoder_stream::create(*_comp, fountainChunkSize, _encodeId);
++	_streamStartBlock = _nextBlockByEncodeId[_encodeId];
++	_fes = fountain_encoder_stream::create(*_comp, fountainChunkSize, _encodeId, _streamStartBlock);
+ 	_comp.reset();
+ 	if (!_fes)
+ 		return -3;
+diff --git a/src/lib/cimbar_js/cimbar_js.h b/src/lib/cimbar_js/cimbar_js.h
+index f30dd8a..410e682 100644
+--- a/src/lib/cimbar_js/cimbar_js.h
++++ b/src/lib/cimbar_js/cimbar_js.h
+@@ -10,6 +10,9 @@ int cimbare_init_window(int width, int height);
+ int cimbare_rotate_window(bool rotate);
+ int cimbare_render();
+ int cimbare_next_frame(bool color_balance=false);
++unsigned cimbare_blocks_required();
++unsigned cimbare_chunks_per_frame();
++unsigned cimbare_next_block_id();
+ int cimbare_init_encode(const char* filename, unsigned fnsize, int encode_id);
+ int cimbare_encode_bufsize();
+ int cimbare_encode(const unsigned char* buffer, unsigned size);
+diff --git a/src/lib/fountain/fountain_encoder_stream.h b/src/lib/fountain/fountain_encoder_stream.h
+index 5a8b0a2..9df7b8c 100644
+--- a/src/lib/fountain/fountain_encoder_stream.h
++++ b/src/lib/fountain/fountain_encoder_stream.h
+@@ -16,11 +16,12 @@ protected:
+ 	static const unsigned _headerSize = 6;
+ 
+ protected:
+-	fountain_encoder_stream(std::string&& data, unsigned buffer_size, uint8_t encode_id)
++	fountain_encoder_stream(std::string&& data, unsigned buffer_size, uint8_t encode_id, unsigned start_block)
+ 		: _data(data)
+ 		, _buffer(buffer_size, 0)
+ 		, _encodeId(encode_id)
+ 		, _encoder((uint8_t*)_data.data(), _data.size(), block_size())
++		, _block(start_block)
+ 	{
+ 	}
+ 
+@@ -31,12 +32,12 @@ protected:
+ 
+ public:
+ 	template <typename STREAM>
+-	static fountain_encoder_stream::ptr create(STREAM& stream, unsigned buffer_size, uint8_t encode_id=0)
++	static fountain_encoder_stream::ptr create(STREAM& stream, unsigned buffer_size, uint8_t encode_id=0, unsigned start_block=0)
+ 	{
+ 		std::stringstream buffs;
+ 		if (stream)
+ 			buffs << stream.rdbuf();
+-		return fountain_encoder_stream::ptr( new fountain_encoder_stream(buffs.str(), buffer_size, encode_id & 0x7F) );
++		return fountain_encoder_stream::ptr( new fountain_encoder_stream(buffs.str(), buffer_size, encode_id & 0x7F, start_block) );
+ 	}
+ 
+ 	// this resets the stream!

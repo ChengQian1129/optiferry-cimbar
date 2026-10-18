@@ -14,7 +14,7 @@ cimbar-send FILE
   -> 校验完整文件 SHA-256 后显示保存按钮
 ```
 
-发送器没有 ACK。多输入播放时，修正版 `cimbar_send` 在每个 stream 发送约两倍所需 fountain 块后切换；单输入仍使用 libcimbar 原有循环。接收器保留有限数量的活动 stream，避免丢帧时旧 stream 无限占用内存。
+发送器没有 ACK。多输入播放时，修正版 `cimbar_send` 为每个输入分配稳定的 stream ID，并在重复轮播时继续使用新的 fountain block 编号；每次出现至少播放约两倍所需块数。block 编号是 16 位，空间耗尽后发送器会停止并要求重新开始传输。接收器最多保留 8 条活动 stream，活动输入总量不超过 64 MiB；达到上限时暂缓新 stream，保留已有进度，待已有 stream 完成后再接纳后续分片。
 
 ## manifest
 
@@ -64,10 +64,10 @@ cimbar-send /mnt/f/path/to/file.zip
 cimbar-send FILE --prepare-only       # 只生成并校验 manifest/分片
 cimbar-send FILE --chunk-size 16MiB   # 更小的独立 stream
 cimbar-send FILE --fps 20             # 需结合屏幕和相机实测
-cimbar-send FILE --mode 4C            # 兼容性测试
+cimbar-send FILE --mode 4C            # 只准备分片；OptiFerry APK 当前固定接收 Mode B
 cimbar-send FILE --new-transfer       # 使用新的准备目录
 ```
 
-手机安装 `dist/OptiFerry-debug.apk` 后，选择「彩码 Cimbar」并对准发送窗口。发送期间不要修改源文件；相同文件和分片大小会复用准备目录，便于重试。空文件当前不支持，因为上游 sender 会跳过 0 字节输入。
+手机安装 `dist/OptiFerry-debug.apk` 后，选择「彩码 Cimbar」并对准发送窗口。发送期间不要修改源文件；相同文件和分片大小会复用准备目录，便于重试。输入文件名不能是 `manifest.json`，这个名字由接收端保留给控制 manifest。空文件当前不支持，因为上游 sender 会跳过 0 字节输入。
 
 `protocol/OPM1.md` 文件名保留是为了兼容旧链接；当前实现以本页的 `cimbar-bigfile` manifest 为准。

@@ -37,6 +37,7 @@ public:
 					_isError = true;
 					return false; // we're not making progress, mayday mayday
 				}
+				_lastResult = res;
 
 				if (output.pos > 0)
 				{
@@ -90,7 +91,17 @@ public:
 			if (!write(srcBuff.data(), bytesRead))
 				break;
 		}
+		if (!finish())
+		{
+			_lastError << " incomplete zstd frame";
+			_isError = true;
+		}
 		return totalBytesRead;
+	}
+
+	bool finish() const
+	{
+		return !_isError and _lastResult == 0 and STREAM::good();
 	}
 
 	bool good() const
@@ -110,6 +121,7 @@ protected:
 	std::string_view _inBuff;
 
 	bool _isError = false;
+	size_t _lastResult = 1;
 	std::stringstream _lastError;
 };
 

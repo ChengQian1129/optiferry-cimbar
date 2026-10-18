@@ -16,11 +16,12 @@ protected:
 	static const unsigned _headerSize = 6;
 
 protected:
-	fountain_encoder_stream(std::string&& data, unsigned buffer_size, uint8_t encode_id)
+	fountain_encoder_stream(std::string&& data, unsigned buffer_size, uint8_t encode_id, unsigned start_block)
 		: _data(data)
 		, _buffer(buffer_size, 0)
 		, _encodeId(encode_id)
 		, _encoder((uint8_t*)_data.data(), _data.size(), block_size())
+		, _block(start_block)
 	{
 	}
 
@@ -31,12 +32,12 @@ protected:
 
 public:
 	template <typename STREAM>
-	static fountain_encoder_stream::ptr create(STREAM& stream, unsigned buffer_size, uint8_t encode_id=0)
+	static fountain_encoder_stream::ptr create(STREAM& stream, unsigned buffer_size, uint8_t encode_id=0, unsigned start_block=0)
 	{
 		std::stringstream buffs;
 		if (stream)
 			buffs << stream.rdbuf();
-		return fountain_encoder_stream::ptr( new fountain_encoder_stream(buffs.str(), buffer_size, encode_id & 0x7F) );
+		return fountain_encoder_stream::ptr( new fountain_encoder_stream(buffs.str(), buffer_size, encode_id & 0x7F, start_block) );
 	}
 
 	// this resets the stream!

@@ -3,6 +3,8 @@
 *.cpp text eol=lf
 *.hpp text eol=lf
 *.kt text eol=lf
+patches/*.patch text eol=lf
+patches/*.patch whitespace=-blank-at-eol,-space-before-tab
 *.bin binary
 *.apk binary
 dist/qsend binary

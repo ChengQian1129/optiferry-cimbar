@@ -1,14 +1,14 @@
 # Software verification
 
-## Cimbar 彩码多分片更新 — 2026-10-18
+## Cimbar 彩码多分片修复 — 2026-10-18
 
-- OptiFerry Android 端已集成 libcimbar/CFC native 解码、CameraX YUV 分析器、manifest 解析、分片 SHA-256 校验和完整文件合并；包名为 `org.optiferry.receiver`，版本 `0.1.0`。
-- native fountain sink 按完整 `(encode_id, file_size)` stream ID 管理，并限制活动 decoder 数量；修复了原先低位 slot 碰撞导致后续分片无法推进的问题。native frame 队列也加入有限背压，避免旧分片帧无限堆积。
-- native 分片输出先写入唯一临时文件再原子替换，重复传输时不会让接收端读到半写文件；同一 manifest 只在身份变化时重置 native stream 状态。
-- sender cadence 按每帧实际承载的 fountain 块数换算，多输入约发送 2×所需块后切换；此前直接把块数当帧数会把每个分片播放时间放大约 12 倍。
-- `tests/test_cimbar_send.py`: 10 tests passed. Android `testDebugUnitTest`: 62 tests total, 60 executed, 2 existing fixture-dependent skips, 0 failures；`assembleDebug`（arm64-v8a 和 armeabi-v7a native）也通过。
-- 已在 pinned libcimbar `bfb0c8e471820ae493cd3694ea6bed5d5ac06c37` 的干净 worktree 上应用 cadence patch，并成功构建 Release `cimbar_send` target。
-- 尚未完成真实手机、显示器、滚动快门和端到端彩码传输测量；软件验证不能替代光学链路验收。
+- 接收端按完整 `(encode_id, file_size)` 管理 fountain stream；最多保留 8 条活动流和 64 MiB 输入。达到上限时等待空位，不淘汰未完成进度；native 帧队列有界，诊断区显示接纳帧率与丢帧数。
+- 解码输出先写唯一临时文件，校验完整 zstd 帧后再原子发布；manifest 分片合并、图片预览和 MediaStore 保存均使用文件流，避免把完整大文件放进 Java 堆。
+- sender 为每个分片分配稳定的 7 位 stream ID，重复轮播时延续 16 位 fountain block ID，并按每帧实际块数计算播放预算；ID 空间耗尽时明确停止。修复了旧逻辑把块数误当帧数造成约 12 倍播放时长的问题。
+- `python -m pytest -q tests/test_cimbar_send.py`: 12 passed. Android `testDebugUnitTest`: 64 tests, 0 failures/errors, 2 fixture-dependent skips；`assembleDebug` 的 arm64-v8a 和 armeabi-v7a native 构建通过。
+- Host C++ tests: `fountain_test` 26 cases / 157,123 assertions passed；`compression_test` 14 cases / 61 assertions passed。
+- 在干净 pinned libcimbar `bfb0c8e471820ae493cd3694ea6bed5d5ac06c37` 上检查并应用 cadence patch，再应用 WSLg patch；Release `cimbar_send` target 构建成功。
+- `dist/OptiFerry-debug.apk` 的 APK Signature Scheme v2 校验通过，SHA-256 已列入 `dist/SHA256SUMS`。尚未完成真实手机、显示器、滚动快门和端到端彩码传输测量。
 
 ## 2026-09-11 baseline
 

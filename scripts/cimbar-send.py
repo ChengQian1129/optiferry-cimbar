@@ -26,6 +26,7 @@ DEFAULT_CHUNK_BYTES = 10 * 1024 * 1024
 MAX_CHUNK_BYTES = 24 * 1024 * 1024
 MAX_ORIGINAL_BYTES = 120 * MAX_CHUNK_BYTES
 MAX_CHUNKS = 120
+RECEIVER_MODE = "B"
 # libcimbar starts at 109 and increments before the first input is encoded.
 ENCODE_ID_BASE = 110
 COPY_BYTES = 1024 * 1024
@@ -72,6 +73,8 @@ def validate_name(path: Path) -> bytes:
     name = path.name
     if not name or name in {".", ".."}:
         raise ValueError("input filename is empty or invalid")
+    if name.casefold() == "manifest.json":
+        raise ValueError("manifest.json is reserved by the Cimbar transfer format; rename the input file")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in name):
         raise ValueError("input filename contains an unsupported control character")
     encoded = name.encode("utf-8")
@@ -270,6 +273,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("padding must be non-negative")
     if args.compression is not None and args.compression < 0:
         raise ValueError("compression must be non-negative")
+    if not args.prepare_only and args.mode != RECEIVER_MODE:
+        raise ValueError(
+            f"OptiFerry 彩码接收端当前固定使用 Mode {RECEIVER_MODE}; "
+            f"--mode {args.mode} 不能直接接收，请改用 --mode {RECEIVER_MODE}"
+        )
 
     before = file_fingerprint(source)
     size = before[0]

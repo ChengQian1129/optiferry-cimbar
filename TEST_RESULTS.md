@@ -5,10 +5,11 @@
 - 接收端按完整 `(encode_id, file_size)` 管理 fountain stream；最多保留 8 条活动流和 64 MiB 输入。达到上限时等待空位，不淘汰未完成进度；native 帧队列有界，诊断区显示接纳帧率与丢帧数。
 - 解码输出先写唯一临时文件，校验完整 zstd 帧后再原子发布；manifest 分片合并、图片预览和 MediaStore 保存均使用文件流，避免把完整大文件放进 Java 堆。
 - sender 为每个分片分配稳定的 7 位 stream ID，重复轮播时延续 16 位 fountain block ID，并按每帧实际块数计算播放预算；ID 空间耗尽时明确停止。修复了旧逻辑把块数误当帧数造成约 12 倍播放时长的问题。
-- `python -m pytest -q tests/test_cimbar_send.py`: 12 passed. Android `testDebugUnitTest`: 64 tests, 0 failures/errors, 2 fixture-dependent skips；`assembleDebug` 的 arm64-v8a 和 armeabi-v7a native 构建通过。
+- `python -m pytest -q tests/test_cimbar_send.py`: 15 passed. Android `testDebugUnitTest`: 74 tests, 0 failures/errors, 2 fixture-dependent skips；`assembleDebug` 的 arm64-v8a 和 armeabi-v7a native 构建通过。
 - Host C++ tests: `fountain_test` 26 cases / 157,123 assertions passed；`compression_test` 14 cases / 61 assertions passed。
-- 在干净 pinned libcimbar `bfb0c8e471820ae493cd3694ea6bed5d5ac06c37` 上检查并应用 cadence patch，再应用 WSLg patch；Release `cimbar_send` target 构建成功。
-- `dist/OptiFerry-debug.apk` 的 APK Signature Scheme v2 校验通过，SHA-256 已列入 `dist/SHA256SUMS`。尚未完成真实手机、显示器、滚动快门和端到端彩码传输测量。
+- 在干净 pinned libcimbar `bfb0c8e471820ae493cd3694ea6bed5d5ac06c37` worktree 上应用 WSLg 和 cadence-v2 patches；Release `cimbar_send` target 构建成功，版本标识验证通过。
+- 100 MiB 稀疏文件由 sender 成功准备为 10 个 10 MiB 分片；接收端 2×19 MiB 边界用例流式验证分片与完整 SHA-256。WSL 已安装的 sender 与 `.sha256` sidecar 已更新并验证为 cadence-v2。
+- `dist/OptiFerry-debug.apk` 的 APK Signature Scheme v2 校验通过，SHA-256 `a8876185522862d71d5bfce928c12cb05fa1034bbb6f3f55aa7a19454f8ddbcc` 已列入 `dist/SHA256SUMS`。当前没有连接的 adb 设备；真实手机、显示器、滚动快门和端到端光学传输仍未实测。
 
 ## 2026-09-11 baseline
 

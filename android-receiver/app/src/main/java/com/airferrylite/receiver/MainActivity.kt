@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cimbarAnalyzer: CimbarFrameAnalyzer
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var protocolExecutor: ExecutorService
+    private lateinit var fileIoExecutor: ExecutorService
     private val assembler = TransferAssembler()
     private val highSpeedAssembler by lazy { HighSpeedAssembler(File(filesDir, "optiferry-highspeed")) }
     private val batchStore by lazy { BatchStore(applicationContext) }
@@ -186,13 +187,19 @@ class MainActivity : AppCompatActivity() {
         val name: String,
         val mime: String,
         val bytes: ByteArray? = null,
-        val file: File? = null
+        val file: File? = null,
+        val partFiles: List<File>? = null,
+        val declaredSize: Long? = null,
+        val expectedSha256: String? = null,
+        val cimbarTransferKey: String? = null
     ) {
         init {
-            require((bytes == null) != (file == null))
+            require(listOf(bytes, file, partFiles).count { it != null } == 1)
+            require((partFiles == null) == (declaredSize == null))
+            require((expectedSha256 == null) == (cimbarTransferKey == null))
         }
 
-        val size: Long get() = bytes?.size?.toLong() ?: file?.length() ?: 0L
+        val size: Long get() = bytes?.size?.toLong() ?: file?.length() ?: declaredSize ?: 0L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -259,6 +266,7 @@ class MainActivity : AppCompatActivity() {
         resetButton.setOnClickListener { confirmResetTransfer() }
         cameraExecutor = Executors.newSingleThreadExecutor()
         protocolExecutor = Executors.newSingleThreadExecutor()
+        fileIoExecutor = Executors.newSingleThreadExecutor()
         frameAnalyzer = QrFrameAnalyzer(
             onDecodedBatch = { decodedBatch ->
                 decodedQrCount.addAndGet(decodedBatch.size.toLong())
@@ -317,6 +325,22 @@ class MainActivity : AppCompatActivity() {
             setCimbarMode(checkedId == R.id.protocolCimbar)
         }
         findViewById<Button>(R.id.copyDiagnosticsButton).setOnClickListener { copyDiagnostics() }
+        fileIoExecutor.execute {
+            val complete = cimbarStore.recoverPendingCompletedFile()
+            if (complete != null) {
+                offerCompletedFile(
+                    "cimbar:${complete.transferKey}",
+                    PendingSave(
+                        complete.name,
+                        mimeForName(complete.name),
+                        partFiles = complete.parts,
+                        declaredSize = complete.size,
+                        expectedSha256 = complete.sha256,
+                        cimbarTransferKey = complete.transferKey
+                    )
+                )
+            }
+        }
         protocolExecutor.execute {
             val saved = batchStore.incompleteTransfers()
             ContextCompat.getMainExecutor(this).execute {
@@ -659,35 +683,47 @@ class MainActivity : AppCompatActivity() {
         resultPanel.visibility = View.VISIBLE
         scanMetaRow.visibility = View.GONE
         resetButton.visibility = View.GONE
-        val names = pending.file?.let { ZipListing.names(it) }
-            ?: pending.bytes?.let { ZipListing.names(it) }
-        val preview = previewBitmap(pending)
-        if (preview != null && (names == null || names.size <= 1)) {
-            resultImage.setImageBitmap(preview)
-            resultImage.visibility = View.VISIBLE
-            resultNamesScroll.visibility = View.GONE
-            resultNames.text = pending.name
-        } else {
-            resultImage.setImageDrawable(null)
-            resultImage.visibility = View.GONE
-            resultNamesScroll.visibility = View.VISIBLE
-            resultNames.text = if (!names.isNullOrEmpty()) names.joinToString("\n") else pending.name
-        }
-        resultMeta.text = if (!names.isNullOrEmpty() && names.size > 1) {
-            "${names.size} 个文件 · ${formatBytes(pending.size)} · ${pending.name}"
-        } else {
-            "${pending.name} · ${formatBytes(pending.size)}"
-        }
+        resultImage.setImageDrawable(null)
+        resultImage.visibility = View.GONE
+        resultNamesScroll.visibility = View.VISIBLE
+        resultNames.text = pending.name
+        resultMeta.text = "${pending.name} · ${formatBytes(pending.size)}"
         statusText.text = "接收完成，可保存或继续接收"
         findViewById<Button>(R.id.continueReceiveButton).isEnabled = true
         processRestarting = false
+
+        fileIoExecutor.execute {
+            val inspectFile = pending.file ?: pending.partFiles?.singleOrNull()
+            val names = inspectFile?.let { ZipListing.names(it) }
+                ?: pending.bytes?.let { ZipListing.names(it) }
+            val preview = previewBitmap(pending)
+            ContextCompat.getMainExecutor(this).execute {
+                if (isDestroyed || pendingSave !== pending) return@execute
+                if (preview != null && (names == null || names.size <= 1)) {
+                    resultImage.setImageBitmap(preview)
+                    resultImage.visibility = View.VISIBLE
+                    resultNamesScroll.visibility = View.GONE
+                    resultNames.text = pending.name
+                } else {
+                    resultImage.setImageDrawable(null)
+                    resultImage.visibility = View.GONE
+                    resultNamesScroll.visibility = View.VISIBLE
+                    resultNames.text = if (!names.isNullOrEmpty()) names.joinToString("\n") else pending.name
+                }
+                resultMeta.text = if (!names.isNullOrEmpty() && names.size > 1) {
+                    "${names.size} 个文件 · ${formatBytes(pending.size)} · ${pending.name}"
+                } else {
+                    "${pending.name} · ${formatBytes(pending.size)}"
+                }
+            }
+        }
     }
 
     private fun previewBitmap(pending: PendingSave) = try {
         val mime = pending.mime.lowercase()
-        if (!mime.startsWith("image/")) null
-        else pending.file?.let { previewBitmapFile(it) }
-            ?: pending.bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+        if (!mime.startsWith("image/") || pending.size > MAX_PREVIEW_SOURCE_BYTES) null
+        else (pending.file ?: pending.partFiles?.singleOrNull())?.let { previewBitmapFile(it) }
+            ?: pending.bytes?.let { previewBitmapBytes(it) }
     } catch (_: Throwable) {
         null
     }
@@ -695,15 +731,29 @@ class MainActivity : AppCompatActivity() {
     private fun previewBitmapFile(file: File): android.graphics.Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val sampleSize = previewSampleSize(bounds) ?: return null
+        return BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+        })
+    }
+
+    private fun previewBitmapBytes(bytes: ByteArray): android.graphics.Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val sampleSize = previewSampleSize(bounds) ?: return null
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+        })
+    }
+
+    private fun previewSampleSize(bounds: BitmapFactory.Options): Int? {
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         var sampleSize = 1
-        while (bounds.outWidth / sampleSize > 2048 || bounds.outHeight / sampleSize > 2048) {
+        while (bounds.outWidth / sampleSize > MAX_PREVIEW_EDGE ||
+            bounds.outHeight / sampleSize > MAX_PREVIEW_EDGE) {
             sampleSize *= 2
         }
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-        }
-        return BitmapFactory.decodeFile(file.absolutePath, options)
+        return sampleSize
     }
 
     private fun showOpeningCamera() {
@@ -970,6 +1020,11 @@ class MainActivity : AppCompatActivity() {
             val progress = cimbarStore.progress()
             cimbarProgress = progress
             val error = cimbarStore.error()
+            val storageBlocked = error?.startsWith("手机存储空间不足") == true
+            if (storageBlocked && ::cimbarAnalyzer.isInitialized) {
+                cimbarAnalyzer.setAnalysisIdle(true)
+                cimbarAnalyzer.resetNativeDecoder()
+            }
             ContextCompat.getMainExecutor(this).execute {
                 if (isDestroyed) return@execute
                 if (!cimbarModeEnabled && complete == null) return@execute
@@ -981,14 +1036,24 @@ class MainActivity : AppCompatActivity() {
                     "彩码分片：${progress.received}/${progress.total} · 已解码文件 ${cimbarLastStats?.completedFiles ?: 0}"
                 }
                 speedText.text = cimbarSpeedLabel(cimbarLastStats)
-                statusText.text = if (complete == null) {
-                    "彩码接收中：${progress.received}/${progress.total} 分片"
-                } else {
-                    "彩码接收完成，SHA-256 校验通过"
+                statusText.text = when {
+                    storageBlocked -> error!!
+                    complete == null -> "彩码接收中：${progress.received}/${progress.total} 分片"
+                    else -> "彩码接收完成，SHA-256 校验通过"
                 }
                 renderDiagnostics()
                 if (complete != null) {
-                    offerCompletedFile("cimbar:${complete.sha256}", complete.name, mimeForName(complete.name), complete.file)
+                    offerCompletedFile(
+                        "cimbar:${complete.transferKey}",
+                        PendingSave(
+                            complete.name,
+                            mimeForName(complete.name),
+                            partFiles = complete.parts,
+                            declaredSize = complete.size,
+                            expectedSha256 = complete.sha256,
+                            cimbarTransferKey = complete.transferKey
+                        )
+                    )
                 }
             }
         }
@@ -1354,12 +1419,43 @@ class MainActivity : AppCompatActivity() {
         }
         saveButton.isEnabled = false
         statusText.text = "正在保存文件…"
-        protocolExecutor.execute {
-            val saved = saveFile(pending)
+        fileIoExecutor.execute {
+            val saveSpaceError = if (pending.cimbarTransferKey != null) {
+                val requiredBytes = pending.size + STORAGE_RESERVE_BYTES
+                if (filesDir.usableSpace < requiredBytes) {
+                    "手机存储空间不足：保存前至少需要 ${formatBytes(requiredBytes)} 可用空间"
+                } else null
+            } else null
+            val saved = if (saveSpaceError == null) saveFile(pending) else null
+            val stagingCleaned = if (saved != null && pending.cimbarTransferKey != null &&
+                pending.expectedSha256 != null) {
+                cimbarStore.markSaved(pending.cimbarTransferKey, pending.expectedSha256)
+            } else true
+            val nextCimbarFile = if (saved != null && stagingCleaned &&
+                pending.cimbarTransferKey != null) {
+                cimbarStore.recoverPendingCompletedFile()
+            } else null
             ContextCompat.getMainExecutor(this).execute {
                 if (isDestroyed || pendingSave !== pending) return@execute
-                saveButton.isEnabled = true
-                statusText.text = saved?.let { "已保存到 Download/OptiFerry/$it" } ?: "保存失败"
+                saveButton.isEnabled = saved == null
+                statusText.text = when {
+                    saved == null -> saveSpaceError ?: "保存失败"
+                    !stagingCleaned -> "已保存到 Download/OptiFerry/$saved；私有缓存清理未完成"
+                    else -> "已保存到 Download/OptiFerry/$saved"
+                }
+                if (nextCimbarFile != null) {
+                    offerCompletedFile(
+                        "cimbar:${nextCimbarFile.transferKey}",
+                        PendingSave(
+                            nextCimbarFile.name,
+                            mimeForName(nextCimbarFile.name),
+                            partFiles = nextCimbarFile.parts,
+                            declaredSize = nextCimbarFile.size,
+                            expectedSha256 = nextCimbarFile.sha256,
+                            cimbarTransferKey = nextCimbarFile.transferKey
+                        )
+                    )
+                }
             }
         }
     }
@@ -1458,7 +1554,8 @@ class MainActivity : AppCompatActivity() {
     private fun cimbarSpeedLabel(stats: CimbarScanStats?): String {
         val frames = stats?.submittedFrames ?: 0L
         val rate = cimbarFramesPerSecond
-        return if (rate > 0.0) "彩码 Cimbar · %.1f 帧/s · $frames 帧".format(rate) else "彩码 Cimbar · $frames 帧"
+        return if (rate > 0.0) "彩码解码帧率 · %.1f 帧/s · $frames 帧".format(rate)
+        else "彩码解码帧 · $frames 帧"
     }
 
     private fun saveFile(pending: PendingSave): String? {
@@ -1467,22 +1564,45 @@ class MainActivity : AppCompatActivity() {
             put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
             put(MediaStore.MediaColumns.MIME_TYPE, pending.mime.ifBlank { "application/octet-stream" })
             put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/OptiFerry")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         return try {
             val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
             try {
                 val output = contentResolver.openOutputStream(uri, "w")
                     ?: throw IllegalStateException("无法打开下载文件")
+                val digest = pending.expectedSha256?.let {
+                    java.security.MessageDigest.getInstance("SHA-256")
+                }
                 output.use { sink ->
                     val bytes = pending.bytes
                     if (bytes != null) {
                         sink.write(bytes)
+                        digest?.update(bytes)
                     } else {
-                        java.io.FileInputStream(requireNotNull(pending.file)).use { source ->
-                            source.copyTo(sink, 256 * 1024)
+                        val files = pending.partFiles ?: listOf(requireNotNull(pending.file))
+                        for (file in files) java.io.FileInputStream(file).use { source ->
+                            val buffer = ByteArray(256 * 1024)
+                            while (true) {
+                                val read = source.read(buffer)
+                                if (read < 0) break
+                                sink.write(buffer, 0, read)
+                                digest?.update(buffer, 0, read)
+                            }
                         }
                     }
                 }
+                val expectedSha = pending.expectedSha256
+                if (expectedSha != null && digest!!.digest().toHexString() != expectedSha.lowercase()) {
+                    throw IllegalStateException("文件保存时 SHA-256 校验失败")
+                }
+                val published = contentResolver.update(
+                    uri,
+                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                    null,
+                    null
+                )
+                if (published <= 0) throw IllegalStateException("无法发布下载文件")
                 safeName
             } catch (_: Exception) {
                 contentResolver.delete(uri, null, null)
@@ -1492,6 +1612,9 @@ class MainActivity : AppCompatActivity() {
             null
         }
     }
+
+    private fun ByteArray.toHexString(): String =
+        joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private fun formatRate(value: Double) = when {
         value < 1024 -> "%.0f B/s".format(value)
@@ -1590,12 +1713,16 @@ class MainActivity : AppCompatActivity() {
         if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.close()
         if (::cameraExecutor.isInitialized) cameraExecutor.shutdownNow()
         if (::protocolExecutor.isInitialized) protocolExecutor.shutdownNow()
+        if (::fileIoExecutor.isInitialized) fileIoExecutor.shutdownNow()
         super.onDestroy()
     }
 
     companion object {
         private const val CAMERA_PERMISSION_REQUEST = 42
         private const val HIGH_SPEED_HEADER_SIZE = 20
+        private const val MAX_PREVIEW_EDGE = 1024
+        private const val MAX_PREVIEW_SOURCE_BYTES = 64L * 1024L * 1024L
+        private const val STORAGE_RESERVE_BYTES = 64L * 1024L * 1024L
         private const val UI_REFRESH_INTERVAL_MS = 100L
         private const val SPEED_REFRESH_INTERVAL_MS = 1000L
         private const val PREFS_NAME = "airferry-lite"

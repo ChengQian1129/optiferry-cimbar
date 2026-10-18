@@ -24,6 +24,35 @@ class CimbarSendTests(unittest.TestCase):
         self.assertEqual(cimbar_send.parse_size("2M"), 2 * 1024 * 1024)
         self.assertEqual(cimbar_send.parse_size("1024"), 1024)
 
+    def test_max_chunk_preserves_two_fountain_block_passes(self):
+        frames = cimbar_send.minimum_redundancy_frames(cimbar_send.MAX_CHUNK_BYTES)
+        self.assertLessEqual(
+            frames * cimbar_send.MODE_B_BLOCKS_PER_FRAME,
+            cimbar_send.FOUNTAIN_BLOCK_ID_LIMIT,
+        )
+        self.assertGreater(
+            cimbar_send.minimum_redundancy_frames(cimbar_send.MAX_CHUNK_BYTES + 1024 * 1024)
+            * cimbar_send.MODE_B_BLOCKS_PER_FRAME,
+            cimbar_send.FOUNTAIN_BLOCK_ID_LIMIT,
+        )
+
+    def test_preparation_checks_free_space_before_writing_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "sample.bin"
+            source.write_bytes(b"payload")
+            output = root / "chunks"
+            with mock.patch.object(cimbar_send.shutil, "disk_usage", return_value=mock.Mock(free=0)):
+                with self.assertRaisesRegex(OSError, "insufficient disk space"):
+                    cimbar_send.build_chunks(
+                        source,
+                        output,
+                        4,
+                        hashlib.sha256(source.read_bytes()).hexdigest(),
+                        cimbar_send.validate_name(source),
+                    )
+            self.assertFalse(any(output.glob("*.part*.bin")))
+
     def test_builds_cfc_compatible_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -118,7 +147,7 @@ class CimbarSendTests(unittest.TestCase):
                 mock.patch.object(cimbar_send.shutil, "which", side_effect=which),
                 mock.patch.object(cimbar_send.os, "access", return_value=True),
             ):
-                with self.assertRaisesRegex(RuntimeError, "requires the patched cimbar_send"):
+                with self.assertRaisesRegex(RuntimeError, "requires a cadence-v2 cimbar_send"):
                     cimbar_send.find_sender(None, require_managed=True)
 
     def test_multichunk_send_verifies_managed_binary_hash(self):
@@ -135,24 +164,62 @@ class CimbarSendTests(unittest.TestCase):
                 mock.patch.object(cimbar_send.Path, "home", return_value=root),
                 mock.patch.dict(os.environ, {"CIMBAR_SEND": ""}),
                 mock.patch.object(cimbar_send.shutil, "which", return_value=None),
+                mock.patch.object(
+                    cimbar_send.subprocess,
+                    "run",
+                    return_value=mock.Mock(
+                        returncode=0,
+                        stdout=f"{cimbar_send.MANAGED_SENDER_VERSION}\n",
+                        stderr="",
+                    ),
+                ),
             ):
                 self.assertEqual(
                     str(managed), cimbar_send.find_sender(None, require_managed=True)
                 )
+                with mock.patch.object(
+                    cimbar_send.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=0, stdout="stale-cadence\n", stderr=""),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "install record or cadence version"):
+                        cimbar_send.find_sender(None, require_managed=True)
                 managed.write_bytes(b"old-sender")
                 with self.assertRaisesRegex(RuntimeError, "does not match its install record"):
                     cimbar_send.find_sender(None, require_managed=True)
 
-    def test_explicit_sender_is_allowed_for_multichunk_send(self):
+    def test_explicit_sender_must_report_cadence_version_for_multichunk_send(self):
         with tempfile.TemporaryDirectory() as directory:
             explicit = Path(directory) / "custom-cimbar_send"
             explicit.write_bytes(b"custom-sender")
 
-            with mock.patch.object(cimbar_send.os, "access", return_value=True):
+            with (
+                mock.patch.object(cimbar_send.os, "access", return_value=True),
+                mock.patch.object(
+                    cimbar_send.subprocess,
+                    "run",
+                    return_value=mock.Mock(
+                        returncode=0,
+                        stdout=f"{cimbar_send.MANAGED_SENDER_VERSION}\n",
+                        stderr="",
+                    ),
+                ),
+            ):
                 self.assertEqual(
                     str(explicit),
                     cimbar_send.find_sender(str(explicit), require_managed=True),
                 )
+
+            with (
+                mock.patch.object(cimbar_send.os, "access", return_value=True),
+                mock.patch.object(
+                    cimbar_send.subprocess,
+                    "run",
+                    return_value=mock.Mock(returncode=0, stdout="stale-cadence\n", stderr=""),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "does not report OPTIFERRY_CIMBAR_CADENCE_V2"):
+                    cimbar_send.find_sender(str(explicit), require_managed=True)
 
     def test_prepare_only_does_not_need_a_sender_or_display(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -162,6 +229,23 @@ class CimbarSendTests(unittest.TestCase):
             output = root / "chunks"
             self.assertEqual(cimbar_send.main([str(source), "--output", str(output), "--prepare-only"]), 0)
             self.assertTrue((output / "manifest.json").is_file())
+
+    def test_single_chunk_transfer_requires_the_cadence_managed_sender(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "sample.bin"
+            source.write_bytes(b"payload")
+            output = root / "chunks"
+            with (
+                mock.patch.object(cimbar_send, "find_sender", return_value="/managed/cimbar_send") as find_sender,
+                mock.patch.object(cimbar_send, "require_wslg"),
+                mock.patch.object(cimbar_send.subprocess, "run", return_value=mock.Mock(returncode=0)),
+            ):
+                self.assertEqual(
+                    cimbar_send.main([str(source), "--output", str(output)]),
+                    0,
+                )
+            self.assertTrue(find_sender.call_args.kwargs["require_managed"])
 
     def test_empty_input_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

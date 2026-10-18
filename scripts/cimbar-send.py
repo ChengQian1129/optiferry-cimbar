@@ -23,13 +23,22 @@ import sys
 
 
 DEFAULT_CHUNK_BYTES = 10 * 1024 * 1024
-MAX_CHUNK_BYTES = 24 * 1024 * 1024
+MAX_CHUNK_BYTES = 19 * 1024 * 1024
 MAX_ORIGINAL_BYTES = 120 * MAX_CHUNK_BYTES
 MAX_CHUNKS = 120
 RECEIVER_MODE = "B"
 # libcimbar starts at 109 and increments before the first input is encoded.
 ENCODE_ID_BASE = 110
 COPY_BYTES = 1024 * 1024
+# Mode B carries 12 fountain blocks per frame. Its 625-byte fountain block
+# includes a 6-byte header, leaving 619 bytes for stream data.
+MODE_B_BLOCKS_PER_FRAME = 12
+MODE_B_BLOCK_DATA_BYTES = 619
+FOUNTAIN_BLOCK_ID_LIMIT = 1 << 16
+MIN_BLOCK_REDUNDANCY = 2
+ZSTD_STREAM_OVERHEAD_RESERVE = 256 * 1024
+MANIFEST_SPACE_RESERVE = 64 * 1024
+MANAGED_SENDER_VERSION = "OPTIFERRY_CIMBAR_CADENCE_V2"
 
 
 def parse_size(value: str) -> int:
@@ -93,6 +102,14 @@ def ensure_unchanged(path: Path, before: tuple[int, int]) -> None:
         raise ValueError("input changed during transfer preparation; retry with a stable file")
 
 
+def minimum_redundancy_frames(raw_chunk_bytes: int) -> int:
+    encoded_upper_bound = raw_chunk_bytes + ZSTD_STREAM_OVERHEAD_RESERVE
+    required_blocks = encoded_upper_bound // MODE_B_BLOCK_DATA_BYTES + 1
+    return (
+        MIN_BLOCK_REDUNDANCY * required_blocks + MODE_B_BLOCKS_PER_FRAME - 1
+    ) // MODE_B_BLOCKS_PER_FRAME
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -135,6 +152,24 @@ def build_chunks(
     output_dir.mkdir(parents=True, exist_ok=True)
     basename = strip_extension(name.decode("utf-8"))
     width = 2 if count < 100 else 3
+    missing_bytes = 0
+    existing_rewrite_bytes = 0
+    for index in range(count):
+        length = min(capacity, size - index * capacity) if size else 0
+        filename = f"{basename}.part{index:0{width}d}.bin"
+        output = output_dir / filename
+        if output.is_file() and output.stat().st_size == length:
+            existing_rewrite_bytes = max(existing_rewrite_bytes, length)
+        else:
+            missing_bytes += length
+    required_space = missing_bytes + existing_rewrite_bytes + MANIFEST_SPACE_RESERVE
+    free_space = shutil.disk_usage(output_dir).free
+    if free_space < required_space:
+        raise OSError(
+            "insufficient disk space for Cimbar preparation: "
+            f"need about {required_space} bytes, have {free_space} bytes free"
+        )
+
     chunks: list[dict[str, object]] = []
     with source.open("rb") as source_file:
         for index in range(count):
@@ -198,7 +233,24 @@ def managed_sender_is_verified(sender: Path) -> bool:
         expected = record.read_text(encoding="ascii").strip().split()[0]
     except (OSError, IndexError):
         return False
-    return re.fullmatch(r"[0-9a-f]{64}", expected) is not None and sha256_file(sender) == expected
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None or sha256_file(sender) != expected:
+        return False
+    return sender_supports_cadence_v2(sender)
+
+
+def sender_supports_cadence_v2(sender: Path) -> bool:
+    try:
+        version = subprocess.run(
+            [str(sender), "--optiferry-version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return version.returncode == 0 and version.stdout.strip() == MANAGED_SENDER_VERSION
 
 
 def find_sender(explicit: str | None, *, require_managed: bool = False) -> str:
@@ -225,12 +277,17 @@ def find_sender(explicit: str | None, *, require_managed: bool = False) -> str:
         resolved = shutil.which(candidate) or candidate
         path = Path(resolved).expanduser()
         if path.is_file() and os.access(path, os.X_OK):
-            if require_managed and not manual_override and path.resolve() == managed.resolve() and not managed_sender_is_verified(managed):
-                raise RuntimeError("The managed cimbar_send does not match its install record. Run scripts/install-cimbar-wsl.sh to rebuild it.")
+            if require_managed:
+                is_managed = path.resolve() == managed.resolve()
+                compatible = managed_sender_is_verified(managed) if is_managed else sender_supports_cadence_v2(path)
+                if not compatible:
+                    if is_managed:
+                        raise RuntimeError("The managed cimbar_send does not match its install record or cadence version. Run scripts/install-cimbar-wsl.sh to rebuild it.")
+                    raise RuntimeError(f"{path} does not report {MANAGED_SENDER_VERSION}; provide a compatible sender or run scripts/install-cimbar-wsl.sh.")
             return str(path)
 
     if require_managed and not manual_override:
-        raise RuntimeError("Multi-shard transfer requires the patched cimbar_send. Run scripts/install-cimbar-wsl.sh, or explicitly provide --sender /path/to/cimbar_send.")
+        raise RuntimeError("Cimbar transfer requires a cadence-v2 cimbar_send. Run scripts/install-cimbar-wsl.sh, or provide --sender /path/to/cadence-v2/cimbar_send.")
     raise RuntimeError("cimbar_send was not found. Run scripts/install-cimbar-wsl.sh once, or set CIMBAR_SEND=/path/to/cimbar_send.")
 
 
@@ -242,9 +299,9 @@ def require_wslg() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare and play CFC-compatible Cimbar streams.")
     parser.add_argument("input", type=Path, help="file to send")
-    parser.add_argument("--chunk-size", type=parse_size, default=DEFAULT_CHUNK_BYTES, help="raw bytes per Cimbar stream (default: 10MiB; maximum: 24MiB)")
+    parser.add_argument("--chunk-size", type=parse_size, default=DEFAULT_CHUNK_BYTES, help="raw bytes per Cimbar stream (default: 10MiB; maximum: 19MiB)")
     parser.add_argument("--output", type=Path, help="chunk directory (default: ~/.cache/optiferry-cimbar/transfers/...)")
-    parser.add_argument("--sender", help="cimbar_send executable; otherwise auto-detected or CIMBAR_SEND is used")
+    parser.add_argument("--sender", help="cadence-v2 cimbar_send executable; otherwise auto-detected or CIMBAR_SEND is used")
     parser.add_argument("--fps", type=positive_int, default=15, help="sender FPS (default: 15)")
     parser.add_argument("--mode", type=parse_mode, default="B", help="B, Bm, Bu, or 4C")
     parser.add_argument("--padding", type=int, help="forward black padding to cimbar_send")
@@ -266,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     if not source.is_file():
         raise ValueError(f"input is not a regular file: {source}")
     if args.chunk_size > MAX_CHUNK_BYTES:
-        raise ValueError("chunk size must be <= 24MiB to stay below Cimbar's stream limit")
+        raise ValueError("chunk size must be <= 19MiB to preserve two fountain-block passes")
     if args.chunk_size < 1:
         raise ValueError("chunk size must be positive")
     if args.padding is not None and args.padding < 0:
@@ -321,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         print("prepared only; no sender window was opened")
         return 0
 
-    sender = find_sender(args.sender, require_managed=count > 1)
+    sender = find_sender(args.sender, require_managed=True)
     require_wslg()
     command = [sender, "--fps", str(args.fps), "--mode", args.mode]
     if args.padding is not None:

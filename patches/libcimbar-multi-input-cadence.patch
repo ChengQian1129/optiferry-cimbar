@@ -10,7 +10,26 @@ index e02a107..3a1b53a 100644
  #include <string>
  #include <thread>
  #include <vector>
-@@ -58,6 +59,11 @@ int main(int argc, char** argv)
+@@ -40,8 +41,9 @@ int main(int argc, char** argv)
+ 	options.add_options()
+ 		("i,in", "Source file", cxxopts::value<vector<string>>())
+ 		("f,fps", "Target FPS", cxxopts::value<unsigned>()->default_value(turbo::str::str(defaultFps)))
+ 		("m,mode", "Select a cimbar mode. B modes are new to 0.6.x. 4C is the 0.5.x config. [B,Bm,Bu,4C]", cxxopts::value<string>()->default_value("B"))
+ 		("p,padding", "Black padding around image in pixels.", cxxopts::value<unsigned>()->default_value(turbo::str::str(defaultPadding)))
+ 		("z,compression", "Compression level. 0 == no compression.", cxxopts::value<int>()->default_value(turbo::str::str(compressionLevel)))
+ 		("h,help", "Print usage")
++		("optiferry-version", "Print the OptiFerry cadence version")
+ 	;
+@@ -52,3 +53,8 @@ int main(int argc, char** argv)
+ 	auto result = options.parse(argc, argv);
++	if (result.count("optiferry-version"))
++	{
++		std::cout << "OPTIFERRY_CIMBAR_CADENCE_V2" << std::endl;
++		return 0;
++	}
+ 	if (result.count("help") or !result.count("in"))
+ 	{
+@@ -58,6 +65,11 @@ int main(int argc, char** argv)
  
  	vector<string> infiles = result["in"].as<vector<string>>();
  	compressionLevel = result["compression"].as<int>();
@@ -22,7 +41,7 @@ index e02a107..3a1b53a 100644
  
  	unsigned config_mode = 68;
  	if (result.count("mode"))
-@@ -111,7 +117,8 @@ int main(int argc, char** argv)
+@@ -111,7 +123,8 @@ int main(int argc, char** argv)
  					continue;
  				}
  
@@ -32,7 +51,7 @@ index e02a107..3a1b53a 100644
  				{
  					std::cerr << "failed to 'init encode' file " << filename << std::endl;
  					continue; // abort??
-@@ -132,12 +139,42 @@ int main(int argc, char** argv)
+@@ -132,12 +145,45 @@ int main(int argc, char** argv)
  
  			// after loading our current file, render frames to the screen until next_frame() loops
  			int frameCount = 0;
@@ -60,16 +79,19 @@ index e02a107..3a1b53a 100644
 +				std::cerr << "fountain block-id space exhausted for this input; start a new transfer." << std::endl;
 +				return 74;
 +			}
-+			int nextFrame = 0;
++			int nextFrame = cimbare_next_frame();
++			if (nextFrame < 0)
++				return 0;
++			frameCount = nextFrame;
  			do {
  				start = wait_for_frame_time(delay, start);
  				if (cimbare_render() < 0)
  					return 0;
 +				++framesRendered;
-+				nextFrame = cimbare_next_frame();
-+				++frameCount;
 +				if (frameLimit > 0 && framesRendered >= frameLimit)
 +					break;
++				nextFrame = cimbare_next_frame();
++				++frameCount;
  			}
 -			while (++frameCount == cimbare_next_frame()); // when next_frame() finally loops, we roll to the next file
 +			while (frameCount == nextFrame); // rotate after the per-file budget or the stream reset

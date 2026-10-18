@@ -61,18 +61,20 @@ fi
 if grep -qF 'cimbare_next_block_id' "$source_dir/src/lib/cimbar_js/cimbar_js.h" && \
     grep -qF 'wrap the 7-bit stream ID' "$source_dir/src/lib/cimbar_js/cimbar_js.cpp" && \
     grep -qF 'requestedFrameLimit' "$source_dir/src/exe/cimbar_send/send.cpp" && \
+    grep -qF 'OPTIFERRY_CIMBAR_CADENCE_V2' "$source_dir/src/exe/cimbar_send/send.cpp" && \
     grep -qF 'blocksPerFrame == 0' "$source_dir/src/exe/cimbar_send/send.cpp" && \
     grep -qF 'nextBlockId' "$source_dir/src/exe/cimbar_send/send.cpp" && \
     grep -qF 'const int encodeId = infiles.size() > 1' "$source_dir/src/exe/cimbar_send/send.cpp"; then
     echo 'Multi-input stream cadence patch already present.'
 else
-    # Older working trees used blocks_required() as a frame count. Remove only
-    # those three managed files before applying the corrected frame-budget patch.
+    # Older working trees used blocks_required() as a frame count. Remove the
+    # managed sender files before applying the current cadence patch.
     if grep -qF 'cimbare_blocks_required' "$source_dir/src/lib/cimbar_js/cimbar_js.h"; then
         git -C "$source_dir" checkout -- \
             src/lib/cimbar_js/cimbar_js.h \
             src/lib/cimbar_js/cimbar_js.cpp \
-            src/exe/cimbar_send/send.cpp
+            src/exe/cimbar_send/send.cpp \
+            src/lib/fountain/fountain_encoder_stream.h
     fi
     git -C "$source_dir" apply --check "$cadence_patch"
     git -C "$source_dir" apply "$cadence_patch"
@@ -89,6 +91,11 @@ if [[ -z "$sender" ]]; then
 fi
 
 install -Dm755 "$sender" "$sender_install/cimbar_send"
+sender_version=$("$sender_install/cimbar_send" --optiferry-version)
+if [[ "$sender_version" != 'OPTIFERRY_CIMBAR_CADENCE_V2' ]]; then
+    echo "ERROR: unexpected Cimbar sender cadence version: $sender_version" >&2
+    exit 1
+fi
 sha256sum "$sender_install/cimbar_send" >"$sender_install/cimbar_send.sha256"
 install -Dm755 "$root/scripts/cimbar-send.py" "$HOME/.local/bin/cimbar-send"
 

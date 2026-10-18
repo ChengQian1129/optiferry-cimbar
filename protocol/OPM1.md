@@ -7,14 +7,18 @@
 ```text
 cimbar-send FILE
   -> 计算完整文件 SHA-256
-  -> 按默认 10 MiB（最大 24 MiB）生成 .partNN.bin
+  -> 按默认 10 MiB（最大 19 MiB）生成 .partNN.bin
   -> 生成 manifest.json
   -> libcimbar 依次循环播放 manifest 和所有分片
-  -> OptiFerry 彩码接收端按 manifest 校验并合并
-  -> 校验完整文件 SHA-256 后显示保存按钮
+  -> OptiFerry 彩码接收端校验分片并移入私有暂存目录
+  -> 流式写入 Download 并校验完整文件 SHA-256 后显示保存成功
 ```
 
-发送器没有 ACK。多输入播放时，修正版 `cimbar_send` 为每个输入分配稳定的 stream ID，并在重复轮播时继续使用新的 fountain block 编号；每次出现至少播放约两倍所需块数。block 编号是 16 位，空间耗尽后发送器会停止并要求重新开始传输。接收器最多保留 8 条活动 stream，活动输入总量不超过 64 MiB；达到上限时暂缓新 stream，保留已有进度，待已有 stream 完成后再接纳后续分片。
+发送器没有 ACK。所有 `cimbar-send` 传输都要求 cadence-v2 受管 `cimbar_send`；它为每个输入分配稳定的 stream ID，每轮至少播放两倍所需 fountain block 数，并在后续轮播中延续 16 位 block 编号。block 编号空间耗尽时发送器会明确停止。接收器最多保留 8 条活动 stream，活动输入总量不超过 64 MiB；达到上限时暂缓新 stream，保留已有进度，待已有 stream 完成后再接纳后续分片。
+
+接收端的分片数只在一个完整 fountain stream 解码并校验后增长。界面上的“解码帧率”表示相机帧处理节奏，不是文件字节速度。默认 10 MiB、不可压缩分片在 15 FPS 下约需 3 分钟完成两轮块预算；最大 19 MiB 分片约需 6 分钟，丢帧和相机识别失败会继续拉长时间。因此分片传输期间分片计数可能长时间不变，但只要解码帧率仍在变化，接收端仍在扫描。
+
+接收前会检查私有存储空间，至少预留尚未收到的分片数据、导出到 Download 的完整文件副本和 64 MiB 余量。全新传输最坏约需原文件大小的两倍再加余量；分片已存在时会扣除匹配的已存分片。保存前会再次检查可用空间，避免在空间不足时开始复制大文件。
 
 ## manifest
 
@@ -42,7 +46,7 @@ cimbar-send FILE
 | `size` | integer | 分片字节数 |
 | `sha256` | string | 分片小写 SHA-256 |
 
-接收端要求所有分片大小之和等于 `total_size`，并在写入临时拼接文件时重新计算每个分片和完整文件的 SHA-256。manifest、分片文件名和校验值不满足约束时不会交付文件。
+接收端要求所有分片大小之和等于 `total_size`，逐个重新计算分片 SHA-256，再按序流式计算完整文件 SHA-256。校验通过后，私有暂存中的分片会直接流式复制到 Download；只有 MediaStore 写入成功且完整哈希再次匹配后才清理暂存数据。manifest、分片文件名和校验值不满足约束时不会交付文件。
 
 ## 发送和接收
 
@@ -68,6 +72,6 @@ cimbar-send FILE --mode 4C            # 只准备分片；OptiFerry APK 当前�
 cimbar-send FILE --new-transfer       # 使用新的准备目录
 ```
 
-手机安装 `dist/OptiFerry-debug.apk` 后，选择「彩码 Cimbar」并对准发送窗口。发送期间不要修改源文件；相同文件和分片大小会复用准备目录，便于重试。输入文件名不能是 `manifest.json`，这个名字由接收端保留给控制 manifest。空文件当前不支持，因为上游 sender 会跳过 0 字节输入。
+手机安装 `dist/OptiFerry-debug.apk` 后，选择「彩码 Cimbar」并对准发送窗口。首次使用或更新后在 WSL2 重新运行 `scripts/install-cimbar-wsl.sh`，发送器会核验自身 cadence-v2 标识。发送期间不要修改源文件；相同文件和分片大小会复用准备目录，便于重试。输入文件名不能是 `manifest.json`，这个名字由接收端保留给控制 manifest。空文件当前不支持，因为上游 sender 会跳过 0 字节输入。
 
 `protocol/OPM1.md` 文件名保留是为了兼容旧链接；当前实现以本页的 `cimbar-bigfile` manifest 为准。

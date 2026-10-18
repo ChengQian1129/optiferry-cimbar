@@ -58,6 +58,16 @@ class HighSpeedAssembler(private val stateRoot: File? = null) {
         fun isQuadFullRefresh60Frame(bytes: ByteArray) =
             looksLikeFrame(bytes) && (u8(bytes[1]) == 0x1e || u8(bytes[1]) == 0x1f)
 
+        /**
+         * Identity of one logical fountain stream. Layout/systematic markers
+         * describe how a frame was displayed, not which payload it belongs to;
+         * they must not split the decoder when a sender changes cadence.
+         */
+        fun streamIdentity(bytes: ByteArray): String? {
+            if (!looksLikeFrame(bytes) || bytes.size < FRAME_HEADER_SIZE) return null
+            return Bfb1.hex(bytes.copyOfRange(2, 4)) + Bfb1.hex(bytes.copyOfRange(8, 20))
+        }
+
         private fun layoutCodesOf(bytes: ByteArray) = layoutCodesFromMagic(u8(bytes[1]))
 
         private fun layoutCodesFromMagic(magic: Int) = when (magic) {
@@ -208,7 +218,7 @@ class HighSpeedAssembler(private val stateRoot: File? = null) {
 
     fun accept(bytes: ByteArray): HighSpeedUpdate {
         val frame = parseFrame(bytes) ?: return snapshot(error = "高速二维码帧格式错误")
-        val key = "${frame.sessionId}:${frame.blocks}:${frame.blockLength}:${frame.totalLength}:${frame.payloadFnv}:${frame.layoutCodes}:${if (frame.systematic) 1 else 0}:${if (frame.quadFullRefresh60) 1 else 0}"
+        val key = "${frame.sessionId}:${frame.blocks}:${frame.blockLength}:${frame.totalLength}:${frame.payloadFnv}"
         streamKey = key
         val state = stateFor(key, frame)
         if (state.complete != null) return snapshot(state)

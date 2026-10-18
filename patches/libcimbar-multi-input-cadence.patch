@@ -1,0 +1,55 @@
+diff --git a/src/lib/cimbar_js/cimbar_js.h b/src/lib/cimbar_js/cimbar_js.h
+--- a/src/lib/cimbar_js/cimbar_js.h
++++ b/src/lib/cimbar_js/cimbar_js.h
+@@ -11,5 +11,7 @@
+ int cimbare_render();
+ int cimbare_next_frame(bool color_balance=false);
++unsigned cimbare_blocks_required();
++unsigned cimbare_chunks_per_frame();
+ int cimbare_init_encode(const char* filename, unsigned fnsize, int encode_id);
+ int cimbare_encode_bufsize();
+ int cimbare_encode(const unsigned char* buffer, unsigned size);
+diff --git a/src/lib/cimbar_js/cimbar_js.cpp b/src/lib/cimbar_js/cimbar_js.cpp
+--- a/src/lib/cimbar_js/cimbar_js.cpp
++++ b/src/lib/cimbar_js/cimbar_js.cpp
+@@ -139,1 +139,11 @@
++unsigned cimbare_blocks_required()
++{
++	return _fes ? _fes->blocks_required() : 0;
++}
++
++unsigned cimbare_chunks_per_frame()
++{
++	return cimbar::Config::fountain_chunks_per_frame();
++}
++
+ int cimbare_init_encode(const char* filename, unsigned fnsize, int encode_id)
+diff --git a/src/exe/cimbar_send/send.cpp b/src/exe/cimbar_send/send.cpp
+--- a/src/exe/cimbar_send/send.cpp
++++ b/src/exe/cimbar_send/send.cpp
+@@ -133,11 +133,23 @@ int main(int argc, char** argv)
+ 			// after loading our current file, render frames to the screen until next_frame() loops
+ 			int frameCount = 0;
++			unsigned framesRendered = 0;
++			const unsigned blocksPerFrame = cimbare_chunks_per_frame();
++			const unsigned requiredBlocks = cimbare_blocks_required();
++			const unsigned frameLimit = infiles.size() > 1
++				? (2u * requiredBlocks + blocksPerFrame - 1) / blocksPerFrame
++				: 0u;
++			int nextFrame = 0;
+ 			do {
+ 				start = wait_for_frame_time(delay, start);
+ 				if (cimbare_render() < 0)
+ 					return 0;
++				++framesRendered;
++				nextFrame = cimbare_next_frame();
++				++frameCount;
++				if (frameLimit > 0 && framesRendered >= frameLimit)
++					break;
+ 			}
+-			while (++frameCount == cimbare_next_frame()); // when next_frame() finally loops, we roll to the next file
++			while (frameCount == nextFrame); // rotate after the per-file budget or the stream reset
+ 		}
+ 
+ 	return 0; // should never reach here
+ }

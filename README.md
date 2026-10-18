@@ -14,32 +14,36 @@ qsend /path/to/file
 
 这是可安装、可构建的 0.1.0 首版。真实 Find N5 的光学速度、MediaStore 行为和端到端零操作体验仍须按 [HARDWARE_TEST.md](HARDWARE_TEST.md) 实测，不能将软件测试当成硬件验收通过。
 
-## Cimbar / OpticalReceiver 0.2.x 大文件路径
+## Cimbar 彩色码路径
 
 仓库同时保留两条互不兼容的发送链路：
 
 | 命令 | 屏幕码 | Android 接收端 |
 | --- | --- | --- |
 | `qsend` | OptiFerry AFL2 / 四 QR | `dist/OptiFerry-debug.apk` |
-| `cimbar-send` | libcimbar Cimbar / 单码循环 | `OpticalReceiver 0.2.x` |
+| `cimbar-send` | libcimbar Cimbar / 彩码单码循环 | `dist/OptiFerry-debug.apk` 的「彩码 Cimbar」 |
 
-如果手机安装的是新的 OpticalReceiver，第一次在某个 WSL 环境执行一次：
+手机 APK 是 `org.optiferry.receiver` / OptiFerry 0.1.0。它现在同时包含 libcimbar/CFC 彩码解码器和 manifest 分片合并器；启动后默认选择「彩码 Cimbar」。发送端会先播放 `manifest.json`，再播放每个 `.partNN.bin`，手机按 manifest 顺序校验并合并。
+
+首次在某个 WSL 环境安装发送端：
 
 ```bash
 bash scripts/install-cimbar-wsl.sh
 ```
 
-以后发送任意大小的文件只需要：
+此前安装过旧版本的 WSL 环境也要重新运行一次。多分片轮播修复在原生 `cimbar_send` 中；安装脚本会构建新版、记录二进制哈希并放到受管路径。多分片发送会验证该记录，缺失或不匹配时停止并提示重装，避免退回旧发送器。
+
+以后发送安全上限内的文件只需要：
 
 ```bash
 cimbar-send /mnt/f/wang_ct/CT_DICOM_complete.zip
 ```
 
-这个命令会自动计算哈希、按 24 MiB 生成 OPM1 分片、调用原生 `cimbar_send` 循环播放。手机端会自动校验、去重、合并和验证完整文件，不需要手工拼接。手机显示完整文件完成后，在发送窗口按 ESC 或在 WSL 按 Ctrl-C 停止。
+这个命令会自动计算哈希、按默认 10 MiB 生成彩码分片和 manifest，并调用原生 `cimbar_send` 循环播放。手机会校验每个分片和完整文件 SHA-256，完成后显示保存按钮。
 
-默认是 Mode B / 15 fps；需要实测时可以覆盖：`cimbar-send FILE --fps 20`、`--fps 26`、`--mode 4C` 或 `--chunk-size 16MiB`。分片和 manifest 默认保存在 WSL 原生文件系统的 `~/.cache/optiferry-cimbar/transfers/`，相同、未改变且使用相同分片大小的文件会复用同一个 transfer ID，便于恢复。详细格式见 [protocol/OPM1.md](protocol/OPM1.md)。
+默认是 Mode B / 15 fps；需要实测时可以覆盖：`cimbar-send FILE --fps 20`、`--mode 4C` 或 `--chunk-size 16MiB`。分片和 manifest 默认保存在 WSL 原生文件系统的 `~/.cache/optiferry-cimbar/transfers/`。详细格式见 [protocol/OPM1.md](protocol/OPM1.md)。
 
-注意：普通 `split` 生成的裸分片没有 OPM1 元数据，OpticalReceiver 不会自动合并；不要手动切分，直接使用 `cimbar-send`。
+不要用普通 `split` 手动切分；裸分片没有 manifest，手机无法知道顺序、大小和完整文件哈希。空文件暂不支持发送。
 
 ## 已交付
 

@@ -2,6 +2,7 @@ package com.airferrylite.receiver
 
 import java.util.Base64
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -43,6 +44,37 @@ class HighSpeedAssemblerTest {
         assertTrue(HighSpeedAssembler.looksLikeFrame(frame))
         assertTrue(HighSpeedAssembler.isQuadLayoutFrame(frame))
         assertTrue(HighSpeedAssembler.isQuadFullRefresh60Frame(frame))
+    }
+
+    @Test
+    fun keepsOneDecoderWhenDisplayMarkerChanges() {
+        val frames = listOf(
+            "0QwxSgAAAAAHABAAbgAAACLGYlvjOimgt5OYL00SrR+Mlm92",
+            "0QwxSgEAAAAHABAAbgAAACLGYlsAv9a8vUXIPKMR21C7firi",
+            "0QwxSgIAAAAHABAAbgAAACLGYlv+4okaANkQV+Yce19p7lWG",
+            "0QwxSgMAAAAHABAAbgAAACLGYltjYXRpb24vb2N0ZXQtc3Ry",
+            "0QwxSgQAAAAHABAAbgAAACLGYlvjOimgt5OYL00SrR+Mlm92",
+            "0QwxSgUAAAAHABAAbgAAACLGYltfJCleZG9uNmJybmFwa2xp",
+            "0QwxSgYAAAAHABAAbgAAACLGYltfJCleZG9uNmJybmFwa2xp",
+            "0QwxSgcAAAAHABAAbgAAACLGYlt+BgJvZWFvK2traGRzdWRg",
+            "0QwxSggAAAAHABAAbgAAACLGYlsGABlqbmouamp2Y3Eudnx7",
+            "0QwxSgkAAAAHABAAbgAAACLGYluneW+St5mYN00JrR+MjW92",
+            "0QwxSgoAAAAHABAAbgAAACLGYlvYyaEpAt8VTO0DeVlp+F2P"
+        ).mapIndexed { index, value ->
+            Base64.getDecoder().decode(value).also {
+                // Alternate ordinary quad markers while retaining the same
+                // session, sequence and payload. They are one stream.
+                it[1] = if (index and 1 == 0) 0x0d else 0x0f
+            }
+        }
+        val assembler = HighSpeedAssembler()
+        var update = HighSpeedUpdate(false)
+        for (frame in frames) {
+            update = assembler.accept(frame)
+            assertNull(update.error)
+        }
+        assertNotNull(update.complete)
+        assertEquals(7, update.totalBlocks)
     }
 
     @Test

@@ -29,3 +29,7 @@ The high-speed receiver includes the `zxing-wasm` 2.x QR decoder bundle used by 
 Nayuki QR Code Generator (MIT), commit 3c6d0b3cefb4e049dc337e82237c9644399716a8, https://github.com/nayuki/QR-Code-generator. Copyright/license headers retained in wsl-sender/third_party/nayuki.
 SDL2 and SDL2_ttf (zlib license), dynamically linked from Ubuntu packages. OpenSSL 3 (Apache-2.0), dynamically linked. DejaVu fonts are installed from the distro and retain their upstream font licenses; they are not embedded in the binary.
 BeamFerry and its original third-party notices and copyright headers remain intact. Test-only jsQR is the upstream vendored distribution with its existing Apache-2.0 notice.
+
+## libcimbar / CFC
+
+The Cimbar color-code sender and Android receiver vendor `sz3/libcimbar` at commit `bfb0c8e471820ae493cd3694ea6bed5d5ac06c37`. Its source headers identify the Mozilla Public License 2.0; the upstream license and notices are retained under `android-receiver/app/src/main/cpp/libcimbar/`. The sender cadence patch is kept in `patches/libcimbar-multi-input-cadence.patch`.

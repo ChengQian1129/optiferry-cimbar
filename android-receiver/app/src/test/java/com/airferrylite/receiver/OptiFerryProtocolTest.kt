@@ -45,7 +45,7 @@ class OptiFerryProtocolTest {
                 fun flush(){pending.shuffle(rng);pending.forEach { feed(it);if(rng.nextInt(20)==0)feed(it) };pending.clear()}
                 var previousKey=""
                 while(input.available()>0){val prefix=ByteArray(4);input.readFully(prefix);val length=ByteBuffer.wrap(prefix).order(ByteOrder.LITTLE_ENDIAN).int;assertEquals(2068,length);val frame=ByteArray(length);input.readFully(frame)
-                    val key=Bfb1.hex(frame.copyOfRange(0,4))+Bfb1.hex(frame.copyOfRange(8,20));if(key!=previousKey){flush();previousKey=key}
+                    val key=HighSpeedAssembler.streamIdentity(frame)!!;if(key!=previousKey){flush();previousKey=key}
                     if(rng.nextDouble()>=loss)pending.add(frame)
                     if(pending.size>=32)flush()
                 }

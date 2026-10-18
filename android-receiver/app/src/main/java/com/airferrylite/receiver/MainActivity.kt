@@ -75,12 +75,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var resetButton: Button
     private lateinit var startReceiveButton: Button
     private lateinit var fpsGroup: MaterialButtonToggleGroup
+    private lateinit var protocolGroup: MaterialButtonToggleGroup
     private lateinit var frameAnalyzer: QrFrameAnalyzer
+    private lateinit var cimbarAnalyzer: CimbarFrameAnalyzer
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var protocolExecutor: ExecutorService
     private val assembler = TransferAssembler()
     private val highSpeedAssembler by lazy { HighSpeedAssembler(File(filesDir, "optiferry-highspeed")) }
     private val batchStore by lazy { BatchStore(applicationContext) }
+    private val cimbarStore by lazy { CimbarTransferStore(File(filesDir, "cimbar")) }
+    @Volatile private var cimbarModeEnabled = true
+    @Volatile private var cimbarProgress: CimbarTransferProgress? = null
+    @Volatile private var cimbarLastStats: CimbarScanStats? = null
     @Volatile private var batchProgress: BatchStore.Progress? = null
     @Volatile private var batchStopped = false
     private var cameraProvider: ProcessCameraProvider? = null
@@ -213,6 +219,7 @@ class MainActivity : AppCompatActivity() {
         resetButton = findViewById(R.id.resetButton)
         startReceiveButton = findViewById(R.id.startReceiveButton)
         fpsGroup = findViewById(R.id.fpsGroup)
+        protocolGroup = findViewById(R.id.protocolGroup)
         requestedFps = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(PREF_FPS, 60).let {
             if (it == 30 || it == 120) it else 60
         }
@@ -276,6 +283,19 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+        cimbarAnalyzer = CimbarFrameAnalyzer(
+            dataPath = File(filesDir, "cimbar").absolutePath,
+            onCompleted = { path -> handleCimbarCompleted(path) },
+            onStats = { stats ->
+                cimbarLastStats = stats
+                ContextCompat.getMainExecutor(this).execute { renderDiagnostics() }
+            }
+        )
+        protocolGroup.check(R.id.protocolCimbar)
+        protocolGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            setCimbarMode(checkedId == R.id.protocolCimbar)
+        }
         findViewById<Button>(R.id.copyDiagnosticsButton).setOnClickListener { copyDiagnostics() }
         protocolExecutor.execute {
             val saved = batchStore.incompleteTransfers()
@@ -351,6 +371,27 @@ class MainActivity : AppCompatActivity() {
         skipHalWaitOnBeginReceive = true
         beginReceive()
     }
+
+    private fun setCimbarMode(enabled: Boolean) {
+        if (cimbarModeEnabled == enabled) return
+        cimbarModeEnabled = enabled
+        highSpeedSessionActive = false
+        if (::frameAnalyzer.isInitialized) frameAnalyzer.setAnalysisIdle(enabled)
+        if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.setAnalysisIdle(!enabled)
+        if (enabled) {
+            statusText.text = if (cameraStarted) "正在扫描彩码 Cimbar" else "已选择彩码 Cimbar"
+        } else {
+            statusText.text = if (cameraStarted) "正在扫描四码 QR" else "已选择四码 QR"
+        }
+        if (cameraStarted && imageAnalysis != null) {
+            imageAnalysis?.clearAnalyzer()
+            attachAnalyzer(imageAnalysis!!, settle = false)
+        }
+        renderDiagnostics()
+    }
+
+    private fun activeAnalyzer(): ImageAnalysis.Analyzer =
+        if (cimbarModeEnabled) cimbarAnalyzer else frameAnalyzer
 
     private fun continueReceive() {
         if (processRestarting) return
@@ -444,7 +485,11 @@ class MainActivity : AppCompatActivity() {
         quadPhaseRecovery.reset()
         if (::frameAnalyzer.isInitialized) {
             frameAnalyzer.resetSession()
-            frameAnalyzer.setAnalysisIdle(false)
+            frameAnalyzer.setAnalysisIdle(cimbarModeEnabled)
+        }
+        if (::cimbarAnalyzer.isInitialized) {
+            if (cimbarModeEnabled) cimbarAnalyzer.reset()
+            cimbarAnalyzer.setAnalysisIdle(!cimbarModeEnabled)
         }
         protocolEpoch.incrementAndGet()
         protocolExecutor.execute { highSpeedAssembler.reset() }
@@ -486,7 +531,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun maybeSoftDecoderRecover(stats: ScanStats) {
-        if (batchStopped || !cameraStarted || processRestarting) return
+        if (cimbarModeEnabled || batchStopped || !cameraStarted || processRestarting) return
         if (inHalRecoveryWarmup()) return
         if (stats.submittedFrames < 240) return
         if (highUniqueFrameCount >= 20) return
@@ -511,7 +556,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun maybeRephaseDualCamera(stats: ScanStats) {
-        if (batchStopped || !cameraStarted || bindingCamera || processRestarting || requestedFps != 60) return
+        if (cimbarModeEnabled || batchStopped || !cameraStarted || bindingCamera || processRestarting || requestedFps != 60) return
         if (inHalRecoveryWarmup()) return
         if (!dualPhaseRecovery.observe(
                 stats.dualLayout,
@@ -524,7 +569,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun maybeRephaseQuadCamera(stats: ScanStats) {
-        if (batchStopped || !cameraStarted || bindingCamera || processRestarting || requestedFps != 60) return
+        if (cimbarModeEnabled || batchStopped || !cameraStarted || bindingCamera || processRestarting || requestedFps != 60) return
         if (inHalRecoveryWarmup()) return
         val frames = stats.quadFrameCounts.sum()
         val hits = stats.quadFrameCounts.withIndex().sumOf { (codes, count) -> codes.toLong() * count }
@@ -655,6 +700,7 @@ class MainActivity : AppCompatActivity() {
         cameraStarted = false
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (::frameAnalyzer.isInitialized) frameAnalyzer.setAnalysisIdle(true)
+        if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.setAnalysisIdle(true)
     }
 
     private fun stopScanner() {
@@ -668,7 +714,8 @@ class MainActivity : AppCompatActivity() {
     private fun startScanner() {
         if (isDestroyed) return
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        if (::frameAnalyzer.isInitialized) frameAnalyzer.setAnalysisIdle(false)
+        if (::frameAnalyzer.isInitialized) frameAnalyzer.setAnalysisIdle(cimbarModeEnabled)
+        if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.setAnalysisIdle(!cimbarModeEnabled)
         val bound = imageAnalysis
         if (bound != null) {
             cameraStarted = true
@@ -773,7 +820,7 @@ class MainActivity : AppCompatActivity() {
     private fun attachAnalyzer(analysis: ImageAnalysis, settle: Boolean) {
         val generation = analyzerAttachGeneration.incrementAndGet()
         if (!settle) {
-            analysis.setAnalyzer(cameraExecutor, frameAnalyzer)
+            analysis.setAnalyzer(cameraExecutor, activeAnalyzer())
             return
         }
         val settleMs = if (receiveSessionFromContinue) CONTINUE_ANALYZER_SETTLE_MS else ANALYZER_SETTLE_MS
@@ -781,8 +828,9 @@ class MainActivity : AppCompatActivity() {
             if (isDestroyed || imageAnalysis !== analysis) return@postDelayed
             if (generation != analyzerAttachGeneration.get()) return@postDelayed
             if (!cameraStarted) return@postDelayed
-            analysis.setAnalyzer(cameraExecutor, frameAnalyzer)
-            if (::frameAnalyzer.isInitialized) frameAnalyzer.setAnalysisIdle(false)
+            analysis.setAnalyzer(cameraExecutor, activeAnalyzer())
+            if (::frameAnalyzer.isInitialized) frameAnalyzer.setAnalysisIdle(cimbarModeEnabled)
+            if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.setAnalysisIdle(!cimbarModeEnabled)
         }, settleMs)
     }
 
@@ -870,6 +918,42 @@ class MainActivity : AppCompatActivity() {
             frameAnalyzer.setAnalysisIdle(true)
             freezeSessionDuration(SystemClock.elapsedRealtime())
             offerCompletedFile(meta.session, meta.name, meta.mime, complete)
+        }
+    }
+
+    private fun handleCimbarCompleted(path: String) {
+        protocolExecutor.execute {
+            val complete = cimbarStore.acceptCompletedFile(path)
+            if (cimbarStore.consumeManifestResetRequest() && ::cimbarAnalyzer.isInitialized) {
+                // A new manifest identifies a new transfer. Clear native
+                // fountain state once, while repeated manifest loops keep
+                // accumulating repair frames for the same transfer.
+                cimbarAnalyzer.resetNativeDecoder()
+            }
+            val progress = cimbarStore.progress()
+            cimbarProgress = progress
+            val error = cimbarStore.error()
+            ContextCompat.getMainExecutor(this).execute {
+                if (isDestroyed) return@execute
+                if (!cimbarModeEnabled && complete == null) return@execute
+                fileText.text = progress.filename?.let {
+                    "$it · ${progress.received}/${progress.total} 分片 · ${formatBytes(progress.bytes)}"
+                } ?: "彩码 Cimbar：等待 manifest"
+                progress.progressPercent()?.let { value -> this.progress.progress = value }
+                missingText.text = if (error != null) "彩码异常：$error" else {
+                    "彩码分片：${progress.received}/${progress.total} · 已解码文件 ${cimbarLastStats?.completedFiles ?: 0}"
+                }
+                speedText.text = "彩码 Cimbar · ${cimbarLastStats?.submittedFrames ?: 0} 帧"
+                statusText.text = if (complete == null) {
+                    "彩码接收中：${progress.received}/${progress.total} 分片"
+                } else {
+                    "彩码接收完成，SHA-256 校验通过"
+                }
+                renderDiagnostics()
+                if (complete != null) {
+                    offerCompletedFile("cimbar:${complete.sha256}", complete.name, mimeForName(complete.name), complete.bytes)
+                }
+            }
         }
     }
 
@@ -1032,6 +1116,7 @@ class MainActivity : AppCompatActivity() {
         assembler.reset()
         protocolExecutor.execute {
             highSpeedAssembler.reset()
+            cimbarStore.reset(deleteFiles = true)
             val cleared = batchStore.clearCompletedBatches()
             ContextCompat.getMainExecutor(this).execute {
                 if (!isDestroyed) {
@@ -1065,6 +1150,8 @@ class MainActivity : AppCompatActivity() {
         lastHighSolved = 0
         lastHighTotal = 0
         frameAnalyzer.consumeRecoverRequest()
+        cimbarProgress = null
+        if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.reset()
         recoverBurst = 0
         softDecoderRecoverAttempted = false
         lastSoftRecoverAt = 0L
@@ -1081,16 +1168,18 @@ class MainActivity : AppCompatActivity() {
             cameraStarted = true
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             attachAnalyzer(bound, settle = true)
-            if (::frameAnalyzer.isInitialized) frameAnalyzer.setAnalysisIdle(false)
+            if (::frameAnalyzer.isInitialized) frameAnalyzer.setAnalysisIdle(cimbarModeEnabled)
+            if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.setAnalysisIdle(!cimbarModeEnabled)
         } else {
-            frameAnalyzer.setAnalysisIdle(false)
+            frameAnalyzer.setAnalysisIdle(cimbarModeEnabled)
+            if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.setAnalysisIdle(!cimbarModeEnabled)
         }
         updateUi(TransferUpdate(null, 0, 0))
         fileText.text = "等待文件"
         progress.progress = 0
-        speedText.text = "新码实时 — · 新码平均 —"
-        missingText.text = "缺失片段：—"
-        statusText.text = "正在高速扫描"
+        speedText.text = if (cimbarModeEnabled) "彩码 Cimbar · 0 帧" else "新码实时 — · 新码平均 —"
+        missingText.text = if (cimbarModeEnabled) "彩码分片：等待 manifest" else "缺失片段：—"
+        statusText.text = if (cimbarModeEnabled) "正在扫描彩码 Cimbar" else "正在高速扫描"
         if (::resultImage.isInitialized) {
             resultImage.setImageDrawable(null)
             resultImage.visibility = View.GONE
@@ -1102,7 +1191,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun maybeRecoverStalledScanner() {
-        if (!cameraStarted || bindingCamera || isDestroyed || imageAnalysis == null) return
+        if (cimbarModeEnabled || !cameraStarted || bindingCamera || isDestroyed || imageAnalysis == null) return
         if (!::frameAnalyzer.isInitialized) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastRecoverAt < RECOVER_COOLDOWN_MS) return
@@ -1171,6 +1260,13 @@ class MainActivity : AppCompatActivity() {
             "推进：$progressState · 最近唯一 ${uniqueAgeMs?.let { "$it ms" } ?: "—"} · 最近解块 ${solvedAgeMs?.let { "$it ms" } ?: "—"}",
             "高速会话：总耗时 $sessionElapsed · 最近帧 $highAge · 唯一载荷 ${formatBytes(sessionUniquePayloadBytes)} · 光学 ${formatBytes(highBytesReceived)} · 速度 ${latestSpeedLabel} · 会话 ${formatRate(sessionAverageBytesPerSecond)}"
         )
+        if (cimbarModeEnabled) {
+            val cimbar = cimbarLastStats
+            val progress = cimbarProgress
+            lines.add(3, "协议：Cimbar 彩码 · 提交 ${cimbar?.submittedFrames ?: 0} 帧 · 解码文件 ${cimbar?.completedFiles ?: 0}")
+            lines.add(4, "分片：${progress?.received ?: 0}/${progress?.total ?: 0} · ${progress?.filename ?: "等待 manifest"}")
+            lines.add(5, "native：libcimbar/CFC 多 stream · 最近帧 ${if ((cimbar?.lastFrameAtMs ?: 0L) == 0L) "—" else "${(now - cimbar!!.lastFrameAtMs).coerceAtLeast(0)} ms"}")
+        }
         if (stats?.dualLayout == true) {
             lines.add(5, "双码：本帧 ${stats.decodedThisFrame} · 完整帧 ${stats.dualCompleteFrames} · 缺半帧 ${stats.dualPartialFrames} · 低频补扫 ${stats.dualRecoveryScans} · 重新定相 ${dualPhaseRecovery.attempts}/3")
             lines.add(6, "双码格位：A ${stats.dualLeftCropHits} · B ${stats.dualRightCropHits} · 轴向 ${stats.dualAxis} · 几何 ${stats.dualGeometry} · 缓存 ${if (stats.dualCacheAvailable) "有" else "无"}")
@@ -1328,6 +1424,17 @@ class MainActivity : AppCompatActivity() {
         else -> "%.1f MB".format(size / 1048576.0)
     }
 
+    private fun CimbarTransferProgress.progressPercent(): Int? {
+        if (total <= 0) return null
+        return (received * 100 / total).coerceIn(0, 100)
+    }
+
+    private fun mimeForName(name: String): String {
+        val extension = name.substringAfterLast('.', "").lowercase()
+        return android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            ?: "application/octet-stream"
+    }
+
     private fun markCameraHeld() {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(PREF_CAMERA_HELD, true).commit()
     }
@@ -1384,6 +1491,7 @@ class MainActivity : AppCompatActivity() {
         imageAnalysis?.clearAnalyzer()
         cameraProvider?.unbindAll()
         if (::frameAnalyzer.isInitialized) frameAnalyzer.close()
+        if (::cimbarAnalyzer.isInitialized) cimbarAnalyzer.close()
         if (::cameraExecutor.isInitialized) cameraExecutor.shutdownNow()
         if (::protocolExecutor.isInitialized) protocolExecutor.shutdownNow()
         super.onDestroy()

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
-import struct
+import json
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +24,7 @@ class CimbarSendTests(unittest.TestCase):
         self.assertEqual(cimbar_send.parse_size("2M"), 2 * 1024 * 1024)
         self.assertEqual(cimbar_send.parse_size("1024"), 1024)
 
-    def test_builds_verifiable_opm1_chunks(self):
+    def test_builds_cfc_compatible_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "sample.zip"
@@ -30,13 +32,10 @@ class CimbarSendTests(unittest.TestCase):
             source.write_bytes(payload)
             digest = hashlib.sha256(payload).hexdigest()
             name = cimbar_send.validate_name(source)
-            transfer_id = cimbar_send.stable_transfer_id(
-                len(payload), 10000, digest, name
-            )
             output = root / "chunks"
 
             chunks, count = cimbar_send.build_chunks(
-                source, output, 10000, transfer_id, digest, name
+                source, output, 10000, digest, name
             )
 
             self.assertEqual(count, 2)
@@ -44,23 +43,36 @@ class CimbarSendTests(unittest.TestCase):
             for index, chunk in enumerate(chunks):
                 path = output / str(chunk["file"])
                 raw = path.read_bytes()
-                header = struct.unpack("<4sBBH16sIIQQ32s32sHH", raw[:116])
-                self.assertEqual(header[0], b"OPM1")
-                self.assertEqual(header[1], 1)
-                self.assertEqual(header[4], transfer_id)
-                self.assertEqual(header[5], index)
-                self.assertEqual(header[6], count)
-                self.assertEqual(header[7], len(payload))
-                self.assertEqual(header[8], 10000)
-                self.assertEqual(header[9], bytes.fromhex(digest))
-                filename_length = header[11]
-                self.assertEqual(filename_length, len(name))
-                self.assertEqual(raw[116 : 116 + filename_length], name)
-                actual_payload = raw[header[3] :]
-                self.assertEqual(hashlib.sha256(actual_payload).digest(), header[10])
-                self.assertEqual(
-                    len(actual_payload), int(chunk["bytes"])
-                )
+                self.assertEqual(raw, payload[index * 10000 : (index + 1) * 10000])
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), chunk["sha256"])
+                self.assertEqual(len(raw), int(chunk["size"]))
+                self.assertEqual(path.name, f"sample.part{index:02d}.bin")
+
+    def test_manifest_shape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "sample.tar.gz"
+            payload = b"cimbar" * 4000
+            source.write_bytes(payload)
+            output = root / "chunks"
+            digest = hashlib.sha256(payload).hexdigest()
+            name = cimbar_send.validate_name(source)
+            chunks, count = cimbar_send.build_chunks(source, output, 4096, digest, name)
+            manifest = {
+                "version": 1,
+                "tool": "cimbar-bigfile",
+                "filename": source.name,
+                "total_size": len(payload),
+                "sha256": digest,
+                "chunk_size": 4096,
+                "chunk_count": count,
+                "encode_id_base": cimbar_send.ENCODE_ID_BASE,
+                "chunks": [{k: c[k] for k in ("index", "size", "sha256")} for c in chunks],
+            }
+            parsed = json.loads(json.dumps(manifest))
+            self.assertEqual(parsed["tool"], "cimbar-bigfile")
+            self.assertEqual(parsed["chunks"][0]["index"], 0)
+            self.assertTrue((output / "sample.tar.part00.bin").is_file())
 
     def test_default_transfer_id_is_repeatable(self):
         name = b"archive.zip"
@@ -68,6 +80,95 @@ class CimbarSendTests(unittest.TestCase):
         first = cimbar_send.stable_transfer_id(10, 10000, digest, name)
         second = cimbar_send.stable_transfer_id(10, 10000, digest, name)
         self.assertEqual(first, second)
+
+    def test_find_sender_prefers_managed_binary_over_path_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            managed = root / ".local/libexec/optiferry-cimbar/cimbar_send"
+            system = root / "usr/local/bin/cimbar_send"
+            managed.parent.mkdir(parents=True)
+            system.parent.mkdir(parents=True)
+            managed.write_bytes(b"managed")
+            system.write_bytes(b"system")
+
+            def which(candidate):
+                return str(system) if candidate == "cimbar_send" else None
+
+            with (
+                mock.patch.object(cimbar_send.Path, "home", return_value=root),
+                mock.patch.dict(os.environ, {"CIMBAR_SEND": ""}),
+                mock.patch.object(cimbar_send.shutil, "which", side_effect=which),
+                mock.patch.object(cimbar_send.os, "access", return_value=True),
+            ):
+                self.assertEqual(str(managed), cimbar_send.find_sender(None))
+
+    def test_multichunk_send_refuses_unmanaged_path_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            system = root / "usr/local/bin/cimbar_send"
+            system.parent.mkdir(parents=True)
+            system.write_bytes(b"old-system-sender")
+
+            def which(candidate):
+                return str(system) if candidate == "cimbar_send" else None
+
+            with (
+                mock.patch.object(cimbar_send.Path, "home", return_value=root),
+                mock.patch.dict(os.environ, {"CIMBAR_SEND": ""}),
+                mock.patch.object(cimbar_send.shutil, "which", side_effect=which),
+                mock.patch.object(cimbar_send.os, "access", return_value=True),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "requires the patched cimbar_send"):
+                    cimbar_send.find_sender(None, require_managed=True)
+
+    def test_multichunk_send_verifies_managed_binary_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            managed = root / ".local/libexec/optiferry-cimbar/cimbar_send"
+            managed.parent.mkdir(parents=True)
+            managed.write_bytes(b"patched-sender")
+            managed.chmod(0o755)
+            record = managed.with_name("cimbar_send.sha256")
+            record.write_text(hashlib.sha256(b"patched-sender").hexdigest() + "  cimbar_send\n")
+
+            with (
+                mock.patch.object(cimbar_send.Path, "home", return_value=root),
+                mock.patch.dict(os.environ, {"CIMBAR_SEND": ""}),
+                mock.patch.object(cimbar_send.shutil, "which", return_value=None),
+            ):
+                self.assertEqual(
+                    str(managed), cimbar_send.find_sender(None, require_managed=True)
+                )
+                managed.write_bytes(b"old-sender")
+                with self.assertRaisesRegex(RuntimeError, "does not match its install record"):
+                    cimbar_send.find_sender(None, require_managed=True)
+
+    def test_explicit_sender_is_allowed_for_multichunk_send(self):
+        with tempfile.TemporaryDirectory() as directory:
+            explicit = Path(directory) / "custom-cimbar_send"
+            explicit.write_bytes(b"custom-sender")
+
+            with mock.patch.object(cimbar_send.os, "access", return_value=True):
+                self.assertEqual(
+                    str(explicit),
+                    cimbar_send.find_sender(str(explicit), require_managed=True),
+                )
+
+    def test_prepare_only_does_not_need_a_sender_or_display(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "sample.bin"
+            source.write_bytes(b"payload")
+            output = root / "chunks"
+            self.assertEqual(cimbar_send.main([str(source), "--output", str(output), "--prepare-only"]), 0)
+            self.assertTrue((output / "manifest.json").is_file())
+
+    def test_empty_input_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "empty.bin"
+            source.write_bytes(b"")
+            with self.assertRaisesRegex(ValueError, "empty"):
+                cimbar_send.main([str(source), "--prepare-only"])
 
 
 if __name__ == "__main__":

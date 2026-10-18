@@ -29,7 +29,7 @@ class BatchResumeIntegrationTest {
                 DataInputStream(BufferedInputStream(File(fixture!!).inputStream())).use { input ->
                     while(input.available()>0){val prefix=ByteArray(4);input.readFully(prefix);val length=ByteBuffer.wrap(prefix).order(ByteOrder.LITTLE_ENDIAN).int
                         val frame=ByteArray(length);input.readFully(frame)
-                        val key=Bfb1.hex(frame.copyOfRange(0,4))+Bfb1.hex(frame.copyOfRange(8,20))
+                        val key=HighSpeedAssembler.streamIdentity(frame)!!
                         if(key in known || rng.nextDouble()<0.2)continue
                         val update=assembler.accept(frame);assertNull(update.error)
                         val bytes=update.complete?.bytes ?: continue

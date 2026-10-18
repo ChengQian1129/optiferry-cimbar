@@ -1,4 +1,16 @@
-# Software verification — 2026-09-11
+# Software verification
+
+## Cimbar 彩码多分片更新 — 2026-10-18
+
+- OptiFerry Android 端已集成 libcimbar/CFC native 解码、CameraX YUV 分析器、manifest 解析、分片 SHA-256 校验和完整文件合并；包名为 `org.optiferry.receiver`，版本 `0.1.0`。
+- native fountain sink 按完整 `(encode_id, file_size)` stream ID 管理，并限制活动 decoder 数量；修复了原先低位 slot 碰撞导致后续分片无法推进的问题。native frame 队列也加入有限背压，避免旧分片帧无限堆积。
+- native 分片输出先写入唯一临时文件再原子替换，重复传输时不会让接收端读到半写文件；同一 manifest 只在身份变化时重置 native stream 状态。
+- sender cadence 按每帧实际承载的 fountain 块数换算，多输入约发送 2×所需块后切换；此前直接把块数当帧数会把每个分片播放时间放大约 12 倍。
+- `tests/test_cimbar_send.py`: 10 tests passed. Android `testDebugUnitTest`: 62 tests total, 60 executed, 2 existing fixture-dependent skips, 0 failures；`assembleDebug`（arm64-v8a 和 armeabi-v7a native）也通过。
+- 已在 pinned libcimbar `bfb0c8e471820ae493cd3694ea6bed5d5ac06c37` 的干净 worktree 上应用 cadence patch，并成功构建 Release `cimbar_send` target。
+- 尚未完成真实手机、显示器、滚动快门和端到端彩码传输测量；软件验证不能替代光学链路验收。
+
+## 2026-09-11 baseline
 
 ## Executed and passed
 

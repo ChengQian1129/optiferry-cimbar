@@ -1,6 +1,7 @@
 build/
 .gradle/
 **/build/
+**/.cxx/
 .npm-cache/
 qr-upstream/
 **/local.properties

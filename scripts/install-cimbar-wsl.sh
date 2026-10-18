@@ -29,6 +29,7 @@ sender_install="${CIMBAR_INSTALL_DIR:-$HOME/.local/libexec/optiferry-cimbar}"
 ref="${CIMBAR_REF:-bfb0c8e471820ae493cd3694ea6bed5d5ac06c37}"
 url='https://github.com/sz3/libcimbar.git'
 patch="$root/patches/libcimbar-wslg-opengl.patch"
+cadence_patch="$root/patches/libcimbar-multi-input-cadence.patch"
 
 if [[ ! -e "$source_dir" ]]; then
     mkdir -p "$(dirname -- "$source_dir")"
@@ -57,6 +58,24 @@ else
     git -C "$source_dir" apply "$patch"
 fi
 
+if grep -qF 'cimbare_chunks_per_frame' "$source_dir/src/lib/cimbar_js/cimbar_js.h" && \
+    grep -qF 'blocksPerFrame' "$source_dir/src/exe/cimbar_send/send.cpp" && \
+    grep -qF 'requiredBlocks + blocksPerFrame' "$source_dir/src/exe/cimbar_send/send.cpp"; then
+    echo 'Multi-input stream cadence patch already present.'
+else
+    # Older working trees used blocks_required() as a frame count. Remove only
+    # those three managed files before applying the corrected frame-budget patch.
+    if grep -qF 'cimbare_blocks_required' "$source_dir/src/lib/cimbar_js/cimbar_js.h" && \
+        grep -qF 'framesRendered >= frameLimit' "$source_dir/src/exe/cimbar_send/send.cpp"; then
+        git -C "$source_dir" checkout -- \
+            src/lib/cimbar_js/cimbar_js.h \
+            src/lib/cimbar_js/cimbar_js.cpp \
+            src/exe/cimbar_send/send.cpp
+    fi
+    git -C "$source_dir" apply --check "$cadence_patch"
+    git -C "$source_dir" apply "$cadence_patch"
+fi
+
 cmake -S "$source_dir" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE=Release -DDISABLE_TESTS=ON
 cmake --build "$build_dir" --target cimbar_send --parallel "${JOBS:-2}"
@@ -68,6 +87,7 @@ if [[ -z "$sender" ]]; then
 fi
 
 install -Dm755 "$sender" "$sender_install/cimbar_send"
+sha256sum "$sender_install/cimbar_send" >"$sender_install/cimbar_send.sha256"
 install -Dm755 "$root/scripts/cimbar-send.py" "$HOME/.local/bin/cimbar-send"
 
 for profile in "$HOME/.profile" "$HOME/.bashrc"; do
@@ -86,4 +106,4 @@ done
 "$HOME/.local/bin/cimbar-send" --help >/dev/null
 printf '\nInstalled Cimbar sender: %s\n' "$sender_install/cimbar_send"
 printf 'Installed command: %s/.local/bin/cimbar-send\n' "$HOME"
-printf 'Open a new WSL terminal, then run: cimbar-send /path/to/large-file\n'
+printf 'Install dist/OptiFerry-debug.apk, select 彩码 Cimbar, then run: cimbar-send /path/to/large-file\n'

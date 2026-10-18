@@ -54,9 +54,9 @@ class BatchStore(private val context: Context) {
         }
         return frameKey(bytes)?.let { known.contains(it) } ?: false
     }
-    // Full AFL2 identity avoids false skips when unrelated 16-bit session IDs collide.
-    fun frameKey(b: ByteArray): String? = if (HighSpeedAssembler.looksLikeFrame(b))
-        Bfb1.hex(b.copyOfRange(0,4)) + Bfb1.hex(b.copyOfRange(8,20)) else null
+    // Full AFL2 stream identity avoids false skips when unrelated 16-bit
+    // session IDs collide and remains stable if the display marker changes.
+    fun frameKey(b: ByteArray): String? = HighSpeedAssembler.streamIdentity(b)
     fun incompleteTransfers(): List<Progress> = root.listFiles().orEmpty()
         .filter { it.name.endsWith(".json") }.mapNotNull { file ->
             try {

@@ -1,71 +1,73 @@
-# OPM1：Cimbar 大文件分片协议
+# Cimbar 彩码多分片 manifest
 
-OpticalReceiver 0.2.x 的大文件路径使用 OPM1。它不是新的光学编码格式，而是放在普通 libcimbar 文件流里面的一层小容器。
+`cimbar-send` 使用 libcimbar 的普通 fountain 文件流传输多个独立输入。每个输入先被 CFC 解压到 Android 应用私有目录；`manifest.json` 描述这些文件如何组成原始文件。这个 manifest 是应用层 JSON，不是新的光学编码格式，也不再使用旧版 OPM1 固定二进制头。
 
-## 端到端流程
+## 流程
 
 ```text
 cimbar-send FILE
-  → 计算 SHA-256
-  → 按 24 MiB（默认）切分
-  → 给每片加 OPM1 头和校验值
-  → 调用原来的 cimbar_send 播放所有分片
-  → Android 逐片还原、持久化、去重
-  → 自动合并并校验完整文件 SHA-256
+  -> 计算完整文件 SHA-256
+  -> 按默认 10 MiB（最大 24 MiB）生成 .partNN.bin
+  -> 生成 manifest.json
+  -> libcimbar 依次循环播放 manifest 和所有分片
+  -> OptiFerry 彩码接收端按 manifest 校验并合并
+  -> 校验完整文件 SHA-256 后显示保存按钮
 ```
 
-用户不需要手动合并分片。发送器没有 ACK，因此会循环播放全部分片；手机显示完整文件校验通过后，用 ESC 或 Ctrl-C 停止发送窗口。
+发送器没有 ACK。多输入播放时，修正版 `cimbar_send` 在每个 stream 发送约两倍所需 fountain 块后切换；单输入仍使用 libcimbar 原有循环。接收器保留有限数量的活动 stream，避免丢帧时旧 stream 无限占用内存。
 
-## 为什么需要发送端准备
+## manifest
 
-普通 libcimbar fountain 流的压缩后大小约受 32 MiB 限制。接收端无法从多个普通流推断它们属于同一个原文件，也无法知道顺序、总大小和完整文件哈希。
+文件名固定为 `manifest.json`，UTF-8 JSON 对象字段如下：
 
-因此，Android 端新增的是“识别并合并 OPM1”，而不是让一个普通 Cimbar 流无限变大。WSL 不需要修改 `cimbar_send` 的协议实现，只需要由 `cimbar-send` 在播放前准备容器。
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `version` | integer | 当前为 `1` |
+| `tool` | string | 固定为 `cimbar-bigfile` |
+| `filename` | string | 最终保存名，只取 basename |
+| `total_size` | integer | 原文件字节数 |
+| `sha256` | string | 原文件小写 SHA-256 |
+| `chunk_size` | integer | 发送端目标分片大小 |
+| `chunk_count` | integer | 分片数量，当前 1 到 120 |
+| `encode_id_base` | integer | 发送端 stream ID 起始值，当前为 110 |
+| `generated_at` | string | UTC 时间，仅供诊断 |
+| `chunks` | array | 按 `index` 升序排列的分片描述 |
 
-## 容器格式
+每个 `chunks` 元素包含：
 
-固定头为 116 字节，之后是 UTF-8 文件名和原始 payload：
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `index` | integer | 从 0 开始且连续 |
+| `file` | string | 例如 `archive.part00.bin`，必须是 basename |
+| `size` | integer | 分片字节数 |
+| `sha256` | string | 分片小写 SHA-256 |
 
-| 偏移 | 长度 | 字段 |
-| ---: | ---: | --- |
-| 0 | 4 | `OPM1` magic |
-| 4 | 1 | 版本，目前为 1 |
-| 6 | 2 | 完整头长度 |
-| 8 | 16 | transfer ID |
-| 24 | 4 | 分片序号，从 0 开始 |
-| 28 | 4 | 分片总数 |
-| 32 | 8 | 原文件字节数 |
-| 40 | 8 | 分片容量 |
-| 48 | 32 | 原文件 SHA-256 |
-| 80 | 32 | 当前 payload SHA-256 |
-| 112 | 2 | 文件名 UTF-8 字节数 |
-| 114 | 2 | 保留，必须为 0 |
-| 116 | N | 文件名 |
+接收端要求所有分片大小之和等于 `total_size`，并在写入临时拼接文件时重新计算每个分片和完整文件的 SHA-256。manifest、分片文件名和校验值不满足约束时不会交付文件。
 
-`cimbar-send` 默认使用 24 MiB payload，最大也是 24 MiB，为 Cimbar 的压缩和头部留出余量。对同一个未改变的输入文件和相同分片大小，默认 transfer ID 可重复生成，便于 Android 端断点恢复；改变分片大小会自然得到新的 ID，需要强制新批次时使用 `--new-transfer`。
+## 发送和接收
 
-## 日常命令
-
-首次在一个 WSL 环境安装：
+首次在 WSL2 安装或更新受管的 sender：
 
 ```bash
 bash scripts/install-cimbar-wsl.sh
 ```
 
-以后发送大文件只需要：
+准备并播放：
 
 ```bash
-cimbar-send /mnt/f/wang_ct/CT_DICOM_complete.zip
+cimbar-send /mnt/f/path/to/file.zip
 ```
 
-常用覆盖项：
+常用参数：
 
 ```bash
-cimbar-send FILE --fps 20             # 提高发送节奏，需实测相机是否跟得上
+cimbar-send FILE --prepare-only       # 只生成并校验 manifest/分片
+cimbar-send FILE --chunk-size 16MiB   # 更小的独立 stream
+cimbar-send FILE --fps 20             # 需结合屏幕和相机实测
 cimbar-send FILE --mode 4C            # 兼容性测试
-cimbar-send FILE --chunk-size 16MiB   # 更保守的分片大小
-cimbar-send FILE --prepare-only       # 只生成 OPM1 分片，不开窗口
-cimbar-send FILE --new-transfer       # 相同文件也建立新的 transfer ID
+cimbar-send FILE --new-transfer       # 使用新的准备目录
 ```
 
-原项目的 `qsend` 仍然是 OptiFerry 自己的 AFL2/四 QR 发送器；它和这里的 `cimbar-send` 属于两条不同协议，不能把两者的 APK 和发送命令混用。
+手机安装 `dist/OptiFerry-debug.apk` 后，选择「彩码 Cimbar」并对准发送窗口。发送期间不要修改源文件；相同文件和分片大小会复用准备目录，便于重试。空文件当前不支持，因为上游 sender 会跳过 0 字节输入。
+
+`protocol/OPM1.md` 文件名保留是为了兼容旧链接；当前实现以本页的 `cimbar-bigfile` manifest 为准。
